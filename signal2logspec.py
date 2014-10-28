@@ -1,13 +1,14 @@
-import mfcc
 import argparse
 import pickle
-import unspeech_utils
 import multiprocessing
 import numpy as np
 import functools
 
+#local imports:
+from feature_gen import mfcc
 #from reddit source code, nicely format progress bar
-import progress
+from utils import progress
+from utils import unspeech_utils
 
 #This script uses mfcc.py, from Sphinx, to compute FBank features.
 
@@ -26,7 +27,7 @@ def genLogspecForId(myid,nofilts,framerate,windowlen):
     return myid+'.logspec'
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Calculate FBANK (logarithmic frequency filter banks) for all supplied ids.')
+    parser = argparse.ArgumentParser(description='Calculate FBANK features (=logarithmic mel frequency filter banks) for all supplied files in file list (txt).')
     parser.add_argument('-f', '--filelist', dest="filelist", help='process this file list, txt format, relative filenames (see also basedir)', default='split_ids.txt', type=str)
     parser.add_argument('-v', dest='verbose', help='verbose output', action='store_true', default=False)
     parser.add_argument('-p', '--parallel', dest='use_parallel', help='parallel computing',action='store_true')
