@@ -3,6 +3,7 @@ import pickle
 import multiprocessing
 import numpy as np
 import functools
+import itertools
 
 #local imports:
 from feature_gen import mfcc
@@ -38,21 +39,16 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
 
     args = parser.parse_args()
-    ids = unspeech_utils.loadIdFile(args.filelist)
-
-    #prefix basedir
-    ids = [args.basedir + myid for myid in ids]
-
-    #remove .wav extension if it exists
-    ids = [(myid[:-4] if myid.endswith('.wav') else myid) for myid in ids]
-
+    ids = unspeech_utils.loadIdFile(args.filelist,basedir=args.basedir)
     genLogspecForId_partial = functools.partial(genLogspecForId,nofilts=args.nfilt,framerate=args.frate,windowlen=args.wlen)
 
     print 'Going to process ', len(ids), ' files.'
 
     if args.use_parallel:
         pool = multiprocessing.Pool()
-        for x in progress.prog_iterate(pool.imap(genLogspecForId_partial, ids), estimate=len(ids), verbosity=1):
-            pass
+        iterator = pool.imap(genLogspecForId_partial, ids)
     else:
-        map(genLogspecForId_partial, ids)
+        iterator = itertools.imap(genLogspecForId_partial, ids)
+    
+    for x in progress.prog_iterate(iterator, estimate=len(ids), verbosity=1):
+        pass

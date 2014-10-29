@@ -15,12 +15,19 @@ def ensure_dir(f):
     if not os.path.exists(d):
         os.makedirs(d)
 
-def loadIdFile(idfile,use_no_files=-1):
+def loadIdFile(idfile,basedir='./',use_no_files=-1):
     ids = []
     with open(idfile) as f:
         ids = f.read().split('\n')[:use_no_files]
     #check if ids exist
     #ids = [myid for myid in ids if os.path.ispath(myid)]
+
+    #prefix basedir
+    ids = [basedir + myid for myid in ids]
+
+    #remove .wav extension if it exists
+    ids = [(myid[:-4] if myid.endswith('.wav') else myid) for myid in ids]
+    
     return ids
 
 def getSignal(utterance):
