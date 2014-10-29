@@ -10,13 +10,13 @@ def getEnergy(spec):
     energy = np.einsum('ij,ij -> i', spec, spec)
     return energy
 
-def filterSpec(spec,filter_divisor=3.0):
+def filterSpec(spec,filter_divisor=1.2):
     energy = getEnergy(spec)
     avg_energy = avgEnergy(energy)
-    print avg_energy
+    #print avg_energy
     first = np.argmax(energy > (avg_energy / filter_divisor))
     last = len(energy) - np.argmax(energy[::-1] > (avg_energy / filter_divisor))
-    print first,last
+    #print first,last
     #sanity check
     if first < last and first >= 0 and last > 0:
         return spec[first:last]

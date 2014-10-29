@@ -2,22 +2,26 @@ from pylab import *
 from utils import unspeech_utils
 import numpy as np
 import argparse
-from feature_gen import energy
+from feature_gen import energy,windowed_fbank
+#from feature_gen import windowed_fbank
 
 def generatePlot(ids,num):
     myid = ids[num]
     signal, framerate = unspeech_utils.getSignal(ids[num]+'.wav')
     
-    logpsec_features = np.load(ids[num]+'.logspec.npy')
-    logpsec_features_filtered = energy.filterSpec(logpsec_features)
+    logspec_features = np.load(ids[num]+'.logspec.npy')
+    logspec_features_filtered = energy.filterSpec(logspec_features,1.2)
     
-    subplot(311)
-    imshow(logpsec_features.T, aspect='auto', interpolation='nearest')
+    subplot(411)
+    imshow(logspec_features.T, aspect='auto', interpolation='nearest')
     #specgram(signal, Fs=framerate, scale_by_freq=True, sides='default')
-    subplot(312)
-    plot(energy.getEnergy(logpsec_features))
-    subplot(313)
-    imshow(logpsec_features_filtered.T, aspect='auto', interpolation='nearest')
+    subplot(412)
+    plot(energy.getEnergy(logspec_features))
+    subplot(413)
+    imshow(logspec_features_filtered.T, aspect='auto', interpolation='nearest')
+    subplot(414)
+    feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size=3,step_size=3)
+    imshow(feat.T, aspect='auto', interpolation='nearest')
     show()
 
 if __name__ == '__main__':
