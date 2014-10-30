@@ -4,6 +4,10 @@ import numpy as np
 from sklearn.cross_validation import train_test_split
 from sklearn.metrics import classification_report
 from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
+from sklearn.preprocessing import StandardScaler
+import sklearn
+import itertools
 
 from utils import unspeech_utils
 from feature_gen import energy,windowed_fbank
@@ -25,7 +29,7 @@ if __name__ == '__main__':
     langs = (args.langs).split(',')
     lang2num = {}
     for i,lang in enumerate(langs):
-        lang2num[lang] = float(i)
+        lang2num[lang] = i
     
     X_trains = []
     y_trains = []
@@ -35,10 +39,10 @@ if __name__ == '__main__':
         for myid in ids[:args.max_samples]:
             logspec_features = np.load(myid+'.logspec.npy')
             logspec_features_filtered = energy.filterSpec(logspec_features,1.2)
-            feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size=30,step_size=10)
+            feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size=21,step_size=15)
             feat_len = feat.shape[0]
             feat_dim = feat.shape[1]
-            labels = np.zeros(feat_len)
+            labels = np.zeros(feat_len,dtype=int)
             labels[:] = lang2num[lang]
             X_trains.append(feat)
             y_trains.append(labels)
@@ -48,7 +52,7 @@ if __name__ == '__main__':
 
     y_all_flat = np.asarray([y[0] for y in y_all])
 
-    print X_all,y_all_flat
+    #print X_all,y_all_flat
 
     sss = StratifiedShuffleSplit(y_all_flat, 1, test_size=0.1, random_state=0)
     
@@ -58,12 +62,18 @@ if __name__ == '__main__':
     y_train, y_test = y_all[train_index], y_all[test_index]
 
     X_train = np.vstack(X_train)
-    X_test = np.vstack(X_test)
+    #X_test = np.vstack(X_test)
     y_train = np.concatenate(y_train)
-    y_test = np.concatenate(y_test)
+    #y_test = np.concatenate(y_test)
 
+    y_test_flat = np.asarray([y[0] for y in y_test]) 
    # X_train, X_test, y_train, y_test = X[train], X[test], Y[train], Y[test]
     #X_train, X_test, y_train, y_test = train_test_split(X_all,y_all, test_size=0.2)
+
+    std_scale = StandardScaler(copy=False, with_mean=True, with_std=False).fit(X_train)
+    #norm_scale = sklearn.preprocessing.Normalizer(norm='l1', copy=False).fit(X_train)
+    
+    X_train = std_scale.transform(X_train)
 
     print 'Done loading data, samplesize:', len(X_all)
 
@@ -71,14 +81,19 @@ if __name__ == '__main__':
     print itemfreq(y_all_flat)
     print y_test
     print 'Distribution of classes in test data:'
-    print itemfreq(y_test)
+    print itemfreq(y_test_flat)
 
-    clf = DBN([X_train.shape[1], 2560, len(langs)],
+    #hid_layer_units = 2560 
+    hid_layer_units = 1000
+
+    clf = DBN([X_train.shape[1],hid_layer_units, hid_layer_units, len(langs)],
+            #dropouts=100,
             learn_rates=0.001,
-            learn_rates_pretrain=0.0005,
+            learn_rates_pretrain=0.00001,
             minibatch_size=200,
-            learn_rate_decays=0.9,
-            epochs=10,
+            #learn_rate_decays=0.9,
+            epochs=15,
+            #use_re_lu=True,
             verbose=1)
 
     print 'fitting dbn...'
@@ -87,8 +102,16 @@ if __name__ == '__main__':
 
     print 'done!'
 
-    y_pred = clf.predict(X_test)
+    y_pred = []
+    for utterance,y in itertools.izip(X_test,y_test):
+        utterance = std_scale.transform(utterance) 
+        local_pred = clf.predict(utterance)
+        voting = np.bincount(local_pred)
+        #majority voting
+        pred = np.argmax(voting)
+        y_pred.append(pred)
 
-    print "Accuracy:", accuracy_score(y_test, y_pred)
+    print "Accuracy:", accuracy_score(y_test_flat, y_pred)
     print "Classification report:"
-    print classification_report(y_test, y_pred)
+    print classification_report(y_test_flat, y_pred)
+    print "Confusion matrix:\n%s" % confusion_matrix(y_test_flat, y_pred)
