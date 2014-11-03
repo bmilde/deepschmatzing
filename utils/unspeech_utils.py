@@ -35,3 +35,10 @@ def getSignal(utterance):
     sound_info = spf.readframes(-1)
     signal = np.fromstring(sound_info, 'Int16')
     return signal, spf.getframerate()
+
+def normalize_unitlength(unit):
+    length = np.linalg.norm(unit)
+    if length != 0:
+        return unit/np.linalg.norm(unit)
+    else:
+        return unit
