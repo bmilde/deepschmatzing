@@ -30,7 +30,9 @@ class MFCC(object):
     def __init__(self, nfilt=40, ncep=13,
                  lowerf=133.3333, upperf=6855.4976, alpha=0.97,
                  samprate=16000, frate=100, wlen=0.0256,
-                 nfft=512):
+                 nfft=512,dtype='float32'):
+        self.dtype = dtype
+
         # Store parameters
         self.lowerf = lowerf
         self.upperf = upperf
@@ -51,7 +53,7 @@ class MFCC(object):
         self.alpha = alpha
 
         # Build mel filter matrix
-        self.filters = numpy.zeros((nfft / 2 + 1, nfilt), 'd')
+        self.filters = numpy.zeros((nfft / 2 + 1, nfilt), self.dtype)
         dfreq = float(samprate) / nfft
         if upperf > samprate / 2:
             raise(Exception,
@@ -61,7 +63,7 @@ class MFCC(object):
         dmelbw = (melmax - melmin) / (nfilt + 1)
         # Filter edges, in Hz
         filt_edge = melinv(melmin + dmelbw *
-                           numpy.arange(nfilt + 2, dtype='d'))
+                           numpy.arange(nfilt + 2, dtype=self.dtype))
 
         for whichfilt in range(0, nfilt):
             # Filter triangles, in DFT points
@@ -103,7 +105,7 @@ class MFCC(object):
 
     def sig2s2mfc(self, sig):
         nfr = int(len(sig) / self.fshift + 1)
-        mfcc = numpy.zeros((nfr, self.ncep), 'd')
+        mfcc = numpy.zeros((nfr, self.ncep), self.dtype)
         fr = 0
         self.framepos = []
         while fr < nfr:
@@ -121,7 +123,7 @@ class MFCC(object):
     def sig2logspec(self, sig):
         nfr = int(len(sig) / self.fshift + 1)
         #print 'number of frames', nfr
-        mfcc = numpy.zeros((nfr, self.nfilt), 'd')
+        mfcc = numpy.zeros((nfr, self.nfilt), self.dtype)
         self.framepos = []
 
         for fr in xrange(nfr):
@@ -140,7 +142,7 @@ class MFCC(object):
 
     def sig2spec(self, sig):
         nfr = int(len(sig) / self.fshift + 1)
-        mfcc = numpy.zeros((nfr, self.nfft / 2 + 1), 'd')
+        mfcc = numpy.zeros((nfr, self.nfft / 2 + 1), self.dtype)
         fr = 0
         while fr < nfr:
             start = round(fr * self.fshift)
@@ -155,7 +157,7 @@ class MFCC(object):
 
     def pre_emphasis(self, frame):
         # FIXME: Do this with matrix multiplication
-        outfr = numpy.empty(len(frame), 'd')
+        outfr = numpy.empty(len(frame), self.dtype)
         outfr[0] = frame[0] - self.alpha * self.prior
         for i in range(1, len(frame)):
             outfr[i] = frame[i] - self.alpha * frame[i - 1]

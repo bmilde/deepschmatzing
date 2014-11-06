@@ -17,7 +17,18 @@ from scipy.stats import itemfreq
 
 from sklearn.cross_validation import StratifiedShuffleSplit
 
+import cPickle as pickle
 
+def serialize(data, filename):
+    f = open(filename,"wb")
+    pickle.dump(data, f, protocol=2)
+    f.close()
+
+def load(filename):
+    f = open(filename,"rb")
+    p = pickle.load(f)
+    f.close()
+    return(p)
 
 #load and construct feature vectors for a single logspec file id
 def loadIdFeat(myid,dtype, window_size, step_size):
@@ -59,7 +70,7 @@ def loadTrainData(ids,classes,window_size,step_size):
     return X_data,y_data
 
 class MyModel:
-    def __init__(self, window_sizes,step_sizes,lang2num,pretrainepochs,epochs,learn_rates=0.001,learn_rates_pretrain=0.00001,minibatch_size=200,hid_layer_units=1000,random_state=0):
+    def __init__(self, window_sizes,step_sizes,lang2num,pretrainepochs,epochs,learn_rates=0.001,learn_rates_pretrain=0.00001,minibatch_size=200,hid_layer_units=1000,dropouts=0,random_state=0):
         self._scalers = []
         self._dbns = []
         #self.all_ids = all_ids
@@ -74,10 +85,11 @@ class MyModel:
         self.learn_rates_pretrain = learn_rates_pretrain
         self.minibatch_size = minibatch_size
         self.hid_layer_units = hid_layer_units
+        self.dropouts = dropouts
         self.random_state = random_state
 
     #Prepare coprpus and train dbn classifier
-    def trainClassifier(self,all_ids,classes,window_size,step_size,pretrainepochs,epochs,learn_rates=0.001,learn_rates_pretrain=0.00001,minibatch_size=200,hid_layer_units=1000,random_state=0):
+    def trainClassifier(self,all_ids,classes,window_size,step_size,pretrainepochs,epochs,learn_rates=0.001,learn_rates_pretrain=0.00001,minibatch_size=200,hid_layer_units=1000,dropouts=0,random_state=0):
         y_all = np.asarray(classes)
         sss = StratifiedShuffleSplit(y_all, 1, test_size=0.1, random_state=random_state)
         
@@ -103,15 +115,15 @@ class MyModel:
         print itemfreq(y_test_flat)
 
 
-        clf = DBN([X_train.shape[1],hid_layer_units, hid_layer_units, hid_layer_units, len(langs)],
-                #dropouts=100,
+        clf = DBN([X_train.shape[1], hid_layer_units, hid_layer_units, hid_layer_units, hid_layer_units, len(langs)],
+                dropouts=dropouts,
                 learn_rates=learn_rates,
                 learn_rates_pretrain=learn_rates_pretrain,
                 minibatch_size=minibatch_size,
                 #learn_rate_decays=0.9,
                 epochs_pretrain=pretrainepochs,
                 epochs=args.epochs,
-                #use_re_lu=True,
+                use_re_lu=True,
                 verbose=1)
 
         print 'fitting dbn...'
@@ -130,22 +142,51 @@ class MyModel:
             self._dbns.append(clf)
             self._scalers.append(std_scale)
     
+    #fuse frame probabiltites, defaults to geometric mean
+    def fuse_op(self,frame_proba, op=scipy.stats.gmean, normalize=True):
+        no_classes = frame_proba.shape[0]
+        
+        #nothing to fuse
+        if frame_proba.shape[1] < 2:
+            return frame_proba
+
+        fused_proba = op(frame_proba)
+        
+        if len(fused_proba) != no_classes:
+            fused_proba.resize((no_classes,))
+        
+        if normalize:
+            return unspeech_utils.normalize_unitlength(fused_proba)
+        else:
+            return fused_proba
+
     def predict_utterance(self,utterance_id):
         voting = []
         multi_pred = []
         for clf,std_scale,window_size,step_size in itertools.izip(self._dbns,self._scalers,self.window_sizes,self.step_sizes):
             utterance = loadIdFeat(myid,'float32',window_size, step_size)
             utterance = std_scale.transform(utterance)
-            local_pred_all = clf.predict(utterance)
-            local_vote = np.bincount(local_pred_all)
-            local_pred = np.argmax(local_vote)
-            if len(local_vote) < no_langs:
-                local_vote.resize((no_langs,))
-            voting += [unspeech_utils.normalize_unitlength(local_vote)]
-            multi_pred += [local_pred]
+            
+            #hard decision per frame, agg with majority voting
+            #local_pred_all = clf.predict(utterance)
+            #local_vote = np.bincount(local_pred_all)          
+            #local_pred = np.argmax(local_vote)
+
+            #soft desision, agg of probabilities
+            frame_proba = clf.predict_proba(utterance)
+            print 'frame_proba shape:', frame_proba.shape
+            
+            local_vote = self.fuse_op(frame_proba,op=scipy.stats.gmean)
+            #local_vote1 = self.fuse_op(frame_proba,op=np.bincount)
+            local_vote2 = self.fuse_op(frame_proba,op=np.add.reduce)
+            local_vote3 = self.fuse_op(frame_proba,op=np.multiply.reduce)
+            local_vote4 = self.fuse_op(frame_proba,op=np.maximum.reduce)
+
+            voting += [local_vote,local_vote2,local_vote3,local_vote4]
+            multi_pred += [np.argmax(local_vote),np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote4)]
         
         #geometric mean of classifiers, majority voting on utterance
-        pred = np.argmax(scipy.stats.gmean(voting))
+        pred = np.argmax(np.add.reduce(voting))
         return pred,multi_pred 
 
 def print_classificationreport(real_classes, predicted_classes):
@@ -163,10 +204,13 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
     parser.add_argument('-e', '--epochs',dest='epochs', help='number of supervised finetuning epochs', default = 20, type=int)
     parser.add_argument('-p', '--pretrain-epochs',dest='pretrainepochs', help='number of unsupervised epochs', default = 10, type=int)
+    parser.add_argument('-s', '--save-model',dest='modelfilename', help='store trained model to this filename, if specified', default = '', type=str)
+    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in dbn', default = 0.0, type=float)
+    parser.add_argument('-u', '--hidden-layer-units',dest='hiddenlayerunits', help='dropout param in dbn', default = 1000, type=int)
 
-    no_classifiers = 2
-    window_sizes = [15,26]#[11,21]
-    step_sizes = [10,17]#[7,15]
+    no_classifiers = 1
+    window_sizes = [21] #[15,26]#[11,21]
+    step_sizes = [15] #[10,17]#[7,15]
 
     hid_layer_units = 1000
 
@@ -188,7 +232,7 @@ if __name__ == '__main__':
             all_ids.append(myid)
             classes.append(lang2num[lang])
 
-    model = MyModel(window_sizes,step_sizes,lang2num,pretrainepochs=args.pretrainepochs,epochs=args.epochs)
+    model = MyModel(window_sizes,step_sizes,lang2num,pretrainepochs=args.pretrainepochs,epochs=args.epochs,dropouts=args.dropouts,hid_layer_units=args.hiddenlayerunits)
     model.fit(all_ids,classes)
 
     #aggregated predictions by geometric mean
@@ -198,17 +242,22 @@ if __name__ == '__main__':
 
     #now test on heldout ids (dev set)
     for myid in model.X_ids_test:
+        print 'testing',myid
         pred,multi_pred = model.predict_utterance(myid)
         y_multi_pred.append(multi_pred)
         y_pred.append(pred)
 
     print lang2num
     print 'Single classifier performance scores:'
-    for i in xrange(no_classifiers):
-        print 'Clf #',i,':'
-        print 'Window size', window_sizes[i],'step size',step_sizes[i]
+    for i in xrange(len(multi_pred)):
+        print 'Pred #',i,':'
+        #print 'Window size', window_sizes[i],'step size',step_sizes[i]
         print_classificationreport(model.y_test_flat, [pred[i] for pred in y_multi_pred])
     print '+'*50
     print lang2num
     print 'Fused scores:'
     print_classificationreport(model.y_test_flat, y_pred)
+    
+    
+    if (args.modelfilename != ''):
+        serialize(model,args.modelfilename)
