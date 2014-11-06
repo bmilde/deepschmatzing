@@ -20,7 +20,7 @@ def generatePlot(ids,num):
     subplot(413)
     imshow(logspec_features_filtered.T, aspect='auto', interpolation='nearest')
     subplot(414)
-    feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size=3,step_size=3)
+    feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size=9,step_size=3,stride=3)
     imshow(feat.T, aspect='auto', interpolation='nearest')
     show()
 
