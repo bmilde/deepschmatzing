@@ -42,3 +42,10 @@ def normalize_unitlength(unit):
         return unit/np.linalg.norm(unit)
     else:
         return unit
+
+def shuffle_in_unison(a, b):
+    rng_state = np.random.get_state()
+    np.random.shuffle(a)
+    np.random.set_state(rng_state)
+    np.random.shuffle(b)
+

@@ -28,6 +28,7 @@ print 'base_compiledir ', theano.config.base_compiledir
 
 import logging
 
+
 class ClassMap:
     """
     A tool for converting classification datasets having
@@ -56,15 +57,17 @@ class Classifier:
         
     def _make_dataset(self,x,y):
         y = np.asarray(y, dtype=np.int)
-        if not hasattr( self, "classmap" ):
-            self.classmap = ClassMap(y)
+        #if not hasattr( self, "classmap" ):
+        #    self.classmap = ClassMap(y)
             
-        ds = DenseDesignMatrix(X=x, y=self.classmap.map(y) )
+        ds = DenseDesignMatrix(X=x, y=y )
         ds.convert_to_one_hot()
         return ds
     
     def fit(self, x, y=None ):
-        ds = self._make_dataset(x, y)
+        clip_size = len(y) - (len(y)%self.batch_size)
+        print 'clipping to: ', clip_size
+        ds = self._make_dataset(x[:clip_size], y[:clip_size])
         return self.train( ds )
 
     def train(self, dataset):
@@ -82,7 +85,7 @@ class Classifier:
         
         train = Train( dataset, self.model, 
             self.algorithm, extensions=[momentum_adjustor] )
-        logging.getLogger("pylearn2").setLevel(logging.WARNING)
+        logging.getLogger("pylearn2").setLevel(logging.DEBUG)
         train.main_loop()
         logging.getLogger("pylearn2").setLevel(logging.INFO)
     
@@ -95,9 +98,14 @@ class Classifier:
         return self.fprop(x)
         
     def predict(self, x ):
+        #'need to convert to float32 because of GPU'
+        if x.dtype != 'float32':
+            x = x.astype('float32', copy=True)
+
         y_prob = self.predict_proba(x)
         idx = np.argmax(y_prob,1)
-        y = self.classmap.invmap(idx)
+        y = idx #self.classmap.invmap(idx)
+
         return y
 
     def set_valid_info(self,x,y):
@@ -112,14 +120,18 @@ class Classifier:
 class MaxoutClassifier(Classifier):
     
     def __init__(self, 
+        num_classes = 2,
         num_units = (100,100),
         num_pieces = 3,
         learning_rate = 0.1, 
         irange = 0.005,
         W_lr_scale = 1.,
         b_lr_scale = 1., 
+        batch_size = 100,
+        epochs=100,
         max_col_norm = 1.9365):
         
+        logging.getLogger("pylearn2").setLevel(logging.DEBUG)
         self.__dict__.update( locals() )
         del self.self
     
@@ -138,8 +150,10 @@ class MaxoutClassifier(Classifier):
     def _build_model(self, dataset):
         # is there a more standard way to get this information ?
         n_features = dataset.X.shape[1] 
-        n_classes = len(np.unique( dataset.y ) )
-        
+        n_classes = self.num_classes
+       
+        print 'n_features: ', n_features , ' n_classes:', n_classes
+
         layers = []
         for i, num_units in enumerate(self.num_units):
             
@@ -172,7 +186,7 @@ class MaxoutClassifier(Classifier):
         
                 
         self.model = mlp.MLP(
-            batch_size = 100,
+            batch_size = self.batch_size,
             layers = layers,
             nvis=n_features,
         )
@@ -183,9 +197,9 @@ class MaxoutClassifier(Classifier):
             monitor = MonitorBased( channel_name= "valid_y_misclass", prop_decrease= 0., N= 100)
             print 'using the valid dataset'
         except AttributeError: 
-            warnings.warn('No valid_dataset. Will optimize for 1000 epochs')
+            warnings.warn('No valid_dataset. Will optimize for '+str(self.epochs)+' epochs')
             monitoring_dataset = None
-            monitor = EpochCounter(1000)
+            monitor = EpochCounter(self.epochs)
         
         self.algorithm = sgd.SGD(
             learning_rate= self.learning_rate,
