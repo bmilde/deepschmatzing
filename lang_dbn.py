@@ -22,6 +22,8 @@ from sklearn.cross_validation import StratifiedShuffleSplit
 
 import cPickle as pickle
 
+from py_sparse_filtering import sparseFiltering
+
 def serialize(data, filename):
     f = open(filename,"wb")
     pickle.dump(data, f, protocol=2)

@@ -21,5 +21,5 @@ class MeanNormalize(BaseEstimator, TransformerMixin):
     def transform(self, X):
         X = array2d(X)
         X = as_float_array(X, copy = self.copy)
-        X = X - self._mean
+        X -= self._mean
         return X
