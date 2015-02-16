@@ -1,13 +1,14 @@
 import sys
+import argparse
+import numpy as np
+import theano
+import lasagne
+#higher recrusion limit for large models
 sys.setrecursionlimit(10000)
-
-import gnumpy
-#from nolearn.dbn import DBN
 
 from lasagne import layers
 from lasagne import init
 
-import lasagne
 
 from lasagne.updates import *
 from nolearn.lasagne import NeuralNet
@@ -21,26 +22,14 @@ from nolearn.lasagne import NeuralNet
 Conv2DLayer = layers.Conv2DLayer
 MaxPool2DLayer = layers.MaxPool2DLayer
 
-#import pyplot
-#except ImportError:
-#    print 'Could not import pylearn2, Im trying slower lasagne Conv2D filters instead'
-#    Conv2DLayer = layers.Conv2DLayer
-#    MaxPool2DLayer = layers.MaxPool2DLayer
-#else:  # Use faster (GPU-only) Conv2DCCLayer only if it's available
-#Conv2DLayer = layers.conv.Conv2DLayer
-#MaxPool2DLayer = layers.pool.MaxPool2DLayer
-
-import argparse
-import numpy as np
 from sklearn.cross_validation import train_test_split
+from sklearn.cross_validation import StratifiedShuffleSplit
 from sklearn.metrics import classification_report
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 
 from sklearn.lda import LDA
-
-#from py_sparse_filtering.skSparseFiltering import sparseFilterTransform 
 
 from sparse_filtering.sparse_filtering import SparseFiltering
 
@@ -56,19 +45,16 @@ import itertools
 from pylab import *
 import matplotlib.pyplot
 
-from utils import unspeech_utils,ZCA,mean_substract,pylearnkit
+from utils import unspeech_utils,ZCA,mean_substract
 
 from feature_gen import energy,windowed_fbank
 
 import scipy.stats
 from scipy.stats import itemfreq
 
-from sklearn.cross_validation import StratifiedShuffleSplit
-
+#pickle currently buggy with nolearn, using dill as replacement
 #import cPickle as pickle
-
 import dill as pickle
-import theano
 
 def float32(k):
     return np.cast['float32'](k)
@@ -108,8 +94,8 @@ class AdjustVariable(object):
         new_value = float32(self.ls[epoch - 1])
         getattr(nn, self.name).set_value(new_value)
 
-#custom batch iterator for nolearn
-class MyBatchIterator(object):
+#custom batch iterator for nolearn, that iterates in <minibatch> chunks
+class ForcedEvenBatchIterator(object):
     def __init__(self, batch_size, forced_even=False):
         self.batch_size = batch_size
         self.forced_even = forced_even
@@ -136,12 +122,12 @@ class MyBatchIterator(object):
     def transform(self, Xb, yb):
         return Xb, yb
 
-
 def afterEpoch(nn, train_history):
     #np.set_printoptions(threshold='nan')
     weights = [w.get_value() for w in nn.get_all_params()]
     #print weights
 
+# Simple majority vote over many classifier class probabilities
 def majority_vote(proba):
     return np.bincount(np.argmax(proba, axis=1))
 
@@ -155,7 +141,7 @@ def load(filename):
         p = pickle.load(f)
     return(p)
 
-#load and construct feature vectors for a single logspec file id
+# Load and construct feature vectors for a single logspec file id
 def loadIdFeat(myid,dtype, window_size, step_size,stride,energy_filter=1.2):
     print 'loading:',myid
     logspec_features = np.load(myid+'.logspec.npy')
@@ -166,7 +152,7 @@ def loadIdFeat(myid,dtype, window_size, step_size,stride,energy_filter=1.2):
     feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size,step_size,stride)
     return feat
 
-#load specgrams and generate windowed feature vectors
+# Load specgrams and generate windowed feature vectors
 def loadTrainData(ids,classes,window_size,step_size,stride):
     
     #iterate through all files and find out the space needed to store all data in memory
@@ -179,7 +165,7 @@ def loadTrainData(ids,classes,window_size,step_size,stride):
         required_shape[1] = feat_gen_shape[1]
         required_shape[0] += feat_gen_shape[0]
 
-    # explicitly set X data to 32bit resolution and y data to 8 bit (256 possible languages / classes)
+    # explicitly set X data to 32bit resolution and y data to 8 bit (256 possible classes)
     X_data = np.zeros(required_shape,dtype='float32')
     y_data = np.zeros(required_shape[0],dtype='uint8')
 
@@ -196,63 +182,70 @@ def loadTrainData(ids,classes,window_size,step_size,stride):
 
     return X_data,y_data
 
-class MyModel:
-    def __init__(self, learner,window_sizes,step_sizes,strides,lang2num,pretrainepochs,epochs,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,learn_rates_pretrain=0.0001,minibatch_size=256,hid_layer_units=1000,dropouts=0,random_state=0):
-        self._transforms = []
-        self._dbns = []
-        #self.all_ids = all_ids
-        #self.classes = classes
+#Model configurration hyper parameters
+class ModelConfig:
+    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=1000,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1):
         self.deep_learner = learner
+        
+        #feature generation and class config
         self.window_sizes = window_sizes
         self.step_sizes = step_sizes
         self.strides = strides
         self.pca_components = pca_components
-        self.lang2num = lang2num
-        self.pretrainepochs = pretrainepochs
-        self.epochs = epochs
-        self._no_langs = len(lang2num.keys())
+        self.class2num = class2num
+        self.max_epochs = max_epochs
+        self._no_langs = len(class2num.keys())
         self._no_classes = self._no_langs
-        self.learn_rates = learn_rates
-        self.learn_rates_pretrain = learn_rates_pretrain
-        self.minibatch_size = minibatch_size
-        self.hid_layer_units = hid_layer_units
-        self.dropouts = dropouts
-        self.random_state = random_state
         self.use_pca = use_pca
         self.use_lda = False
         self.use_sparseFiltering = use_sparseFiltering
-        #if not self.use_sparseFiltering:
-        #    self.use_sparseFiltering = (learner=='trees') 
         self.pca_whiten = pca_whiten
 
-    #Prepare coprpus and train dbn classifier
-    def trainClassifier(self,all_ids,classes,window_size,step_size,stride,pretrainepochs,epochs,learn_rates=0.1,learn_rates_pretrain=0.0001,minibatch_size=256,hid_layer_units=1000,dropouts=0,random_state=0):
+        #cnn/dnn config
+        self.learn_rates = learn_rates
+        self.minibatch_size = minibatch_size
+        self.hid_layer_units = hid_layer_units
+        self.dropouts = dropouts
         
-        print 'Using', self.deep_learner, 'as classifier.'
-        print 'hid_layer_units',hid_layer_units
-        print 'use_sparseFiltering:',self.use_sparseFiltering
-        print 'use_pca',self.use_pca
-        print 'use_lda',self.use_lda
+        if dropouts == None:
+            dropouts=[0.1,0.2,0.3,0.5]
+        elif isinstance( dropouts, ( int, long ) ):
+            dropouts_int = dropouts
+            dropouts=[dropouts_int for x in xrange(4)]
+
+        self.random_state = random_state
+ 
+        self.early_stopping_patience = early_stopping_patience
+        self.momentum = momentum
+
+        self.iterations = 1
+
+#Model class that can be pickeled and once trained can be used for classification
+class MyModel:
+    def __init__(self, config):
+        self._transforms = []
+        self._dbns = []
+        self.config = config
+        
+    #Prepare corpus/generate (raw) features and train classifier
+    def trainClassifier(self,all_ids,classes,window_size,step_size,stride,deep_learner):
+        
+        print 'Using', deep_learner, 'as classifier.'
+        print 'hid_layer_units',self.config.hid_layer_units
+        print 'use_sparseFiltering:',self.config.use_sparseFiltering
+        print 'use_pca',self.config.use_pca
+        print 'use_lda',self.config.use_lda
 
         y_all = np.asarray(classes)
-        #sss = StratifiedShuffleSplit(y_all, 1, test_size=0.01, random_state=random_state)
-        #train_index, test_index = iter(sss).next()
-
-        #X_ids_train, X_ids_test = [all_ids[index] for index in train_index], [all_ids[index] for index in test_index]
-        #y_train_flat, y_test_flat = y_all[train_index], y_all[test_index]
-
-        #The vectors in X and corresponding classes y are now only portions of the signal of an id
-        #X_train,y_train = loadTrainData(X_ids_train, y_train_flat, window_size, step_size,stride)
-
         X_train,y_train = loadTrainData(all_ids, y_all, window_size, step_size,stride)
 
         #Scale mean of all training vectors
-        #std_scale = StandardScaler(copy=False, with_mean=True, with_std=False).fit(X_train)
         std_scale = mean_substract.MeanNormalize(copy=False).fit(X_train)
         X_train = std_scale.transform(X_train)
 
         transform_clf = None
 
+        #Sanity check and warning, gpu needs float32
         if(X_train.dtype != 'float32'):
             print 'Warning, training data was not float32 after mean substract: ', X_train.dtype
             X_train = X_train.astype('float32', copy=False)
@@ -261,34 +254,32 @@ class MyModel:
         np.save('data/y_train',y_train)
         np.save('data/X_train_mean',std_scale._mean)
 
-        iterations = 1
-
-        for iteration in xrange(iterations):
-            print 'iteration ', iteration,'/',iterations
+        for iteration in xrange(self.config.iterations):
+            print 'iteration ', iteration,'/',self.config.iterations
             print 'Starting dimensionally reduction'
 
             #todo rename pca to dim reduction
-            if self.use_pca:
+            if self.config.use_pca:
                 print 'using rpca'
-                pca = RandomizedPCA(n_components=self.pca_components, copy=False,
-                               whiten=self.pca_whiten, random_state=random_state)
+                pca = RandomizedPCA(n_components=self.config.pca_components, copy=False,
+                               whiten=self.config.pca_whiten, random_state=random_state)
                 #Pca fit
                 pca.fit(X_train)
                 X_train = pca.transform(X_train)
             else:
                 pca = None
 
-            if self.use_lda:
+            if self.config.use_lda:
                 print 'using LDA'
-                pca = LDA(n_components=self.pca_components)
+                pca = LDA(n_components=self.config.pca_components)
                 pca.fit(X_train,y_train)
                 #lda fit
                 X_train = pca.transform(X_train)
 
-            if self.use_sparseFiltering:
+            if self.config.use_sparseFiltering:
                 print 'using sparseFilterTransform'
                 #pca = sparseFilterTransform(N=hid_layer_units)
-                pca = SparseFiltering(n_features=hid_layer_units, maxfun=self.epochs, iprint=1, stack_orig=True)
+                pca = SparseFiltering(n_features=self.config.hid_layer_units, maxfun=self.config.max_epochs, iprint=1, stack_orig=True)
                 pca.fit(X_train,y_train)
                 print 'fitted data, now transforming...'
                 print 'Shape before transform: ',X_train.shape
@@ -296,36 +287,22 @@ class MyModel:
                 print 'Shape after transform: ',X_train.shape
                 print 'ytrain shape:',y_train.shape
 
-            if self.use_pca or self.use_lda or self.use_sparseFiltering:
+            if self.config.use_pca or self.config.use_lda or self.config.use_sparseFiltering:
                 np.save('data/X_train_transformed',X_train)
 
+            #shuffle training vectors (inplace) for minibatch gradient descent optimisers
             unspeech_utils.shuffle_in_unison(X_train,y_train)
 
             print 'Done loading and transforming data, traindata size: ', float(X_train.nbytes) / 1024.0 / 1024.0, 'MB' 
-            #print 'testsize:', len(X_ids_test)
 
             print 'Distribution of classes in train data:'
-            print itemfreq(y_train),self._no_langs
-            #print 'Distribution of classes in test data:'
-            #print itemfreq(y_test_flat)
+            print itemfreq(y_train),self.config._no_langs
 
             if(X_train.dtype != 'float32'):
                 print 'Warning, training data was not float32 after dim reduction: ', X_train.dtype
                 X_train = X_train.astype('float32', copy=False)
 
-            if self.deep_learner=='pylearn2':
-                print 'Using pylearn2 classifier...'
-                clf = pylearnkit.MaxoutClassifier(
-                        num_pieces = 3,
-                        num_units = (hid_layer_units,hid_layer_units),
-                        learning_rate = learn_rates,
-                        num_classes = self._no_langs,
-                        batch_size=minibatch_size,
-                        epochs=epochs
-                        )
-                print 'pylearn2 maxout: learning_rate:',learn_rates,'minibatch_size:',minibatch_size
-
-            elif self.deep_learner=='trees':
+            elif deep_learner=='trees':
                 print 'Using trees classifier... (2 pass)'
                 
                 transform_clf = None#RandomForestClassifier(n_estimators=50, n_jobs=-1, random_state=42, oob_score=True, verbose=1, compute_importances=True)
@@ -342,31 +319,16 @@ class MyModel:
                 #                           n_jobs=-1,
                 #                           random_state=42)
 
-            elif self.deep_learner=='theanets':
-                print 'Using theanets classifier...'
-
-                train, valid, _i = load_mnist(labels=False)
-                labeled_train, labeled_valid, _ = load_mnist(labels=True)
-                
-                e = theanets.Experiment(
-                          theanets.Classifier,
-                            layers=(784, 16 * 16, 10),
-                              train_batches=100,
-                              )
-
-                e.train(train, valid, optimize='pretrain')
-                e.train(labeled_train, labeled_valid)
-
-            elif self.deep_learner=='cnn':
+            elif deep_learner=='cnn':
 
                 momentum = 0.9
-                print 'conf: momentum:',momentum,'self.learn_rates:',self.learn_rates
+                print 'conf: momentum:',self.config.momentum,'self.learn_rates:',self.config.learn_rates
 
                 feat_len = X_train.shape[1] / window_size
                 window_len = window_size
                 
                 print '2D shape window:',window_len,'x','featlen:',feat_len
-
+                #todo: make sure y and x coordinates are not mixed up
                 X_train = X_train.reshape(-1, 1, window_len, feat_len)
 
                 print 'X_train shape:',X_train.shape 
@@ -378,60 +340,58 @@ class MyModel:
                         ('input', layers.InputLayer),
                         ('conv1', Conv2DLayer),
                         ('pool1', MaxPool2DLayer),
+                        ('dropout1', layers.DropoutLayer),
                         ('conv2', Conv2DLayer),
                         ('pool2', MaxPool2DLayer),
+                        ('dropout2', layers.DropoutLayer),
                         ('conv3', Conv2DLayer),
                         ('pool3', MaxPool2DLayer),
+                        ('dropout3', layers.DropoutLayer),
                         ('hidden4', layers.DenseLayer),
+                        ('dropout4', layers.DropoutLayer),
                         ('hidden5', layers.DenseLayer),
                         ('output', layers.DenseLayer),
                         ],
                     input_shape=(None, 1, window_len, feat_len),
                     conv1_num_filters=32, conv1_filter_size=(3, 3), pool1_ds=(2, 2),
+                    dropout1_p=self.config.dropouts[0],
                     conv2_num_filters=64, conv2_filter_size=(2, 2), pool2_ds=(2, 2),
+                    dropout2_p=self.config.dropouts[1],
                     conv3_num_filters=128, conv3_filter_size=(2, 2), pool3_ds=(2, 2),
-                    hidden4_num_units=self.hid_layer_units, hidden5_num_units=self.hid_layer_units,
-                    output_num_units=self._no_classes, 
+                    dropout3_p=self.config.dropouts[2],
+                    hidden4_num_units=self.config.hid_layer_units, hidden5_num_units=self.config.hid_layer_units,
+                    dropout4_p=self.config.dropouts[3],
+                    output_num_units=self.config._no_classes, 
 
                     output_nonlinearity=lasagne.nonlinearities.softmax,
-                    
+                   
+                    eval_size=0.01,
+
                     on_epoch_finished=[
-                        AdjustVariable('update_learning_rate', start=self.learn_rates, stop=0.0001),
-                        AdjustVariable('update_momentum', start=momentum, stop=0.999),
-                        EarlyStopping(patience=25),
+                        AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.0001),
+                        AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
+                        EarlyStopping(patience=self.config.early_stopping_patience),
                     ],
 
                     update=nesterov_momentum,
-                    #update=sgd,
-                    #
-                    #update_learning_rate=self.learn_rates,
-                    #update_momentum=momentum,
-
-                    update_learning_rate=theano.shared(float32(self.learn_rates)),
-                    update_momentum=theano.shared(float32(momentum)),
+                    update_learning_rate=theano.shared(float32(self.config.learn_rates)),
+                    update_momentum=theano.shared(float32(self.config.momentum)),
 
                     regression=False,
-                    max_epochs=self.epochs,
+                    max_epochs=self.config.max_epochs,
                     verbose=1,
                     
                     #W=init.Uniform() 
-                    
                     )
             else:
-                momentum = 0.9
 
                 y_train = y_train.astype(np.int32)
-                
                 X_train = X_train.astype(np.float32)
 
-                print 'conf: momentum:',momentum,'self.learn_rates:',self.learn_rates
+                print 'conf: momentum:',self.config.momentum,'self.learn_rates:',self.config.learn_rates
 
-                print 'IsNAN check on Xtrain:', np.isnan(X_train).any()
                 print 'X_train type:', X_train.dtype
                 print 'y_train type:', y_train.dtype
-
-                print 'X max: ', np.amax(X_train)
-                print 'X min: ', np.amin(X_train)
 
                 clf = NeuralNet(
                         layers=[  # three layers: one hidden layer
@@ -444,10 +404,9 @@ class MyModel:
                                 input_shape=(None, X_train.shape[1]),  # a x b input pixels per batch
                                 hidden_num_units=self.hid_layer_units,  # number of units in hidden layer
                                 output_num_units=self._no_classes,
-                                #output_nonlinearity=lasagne.nonlinearities.softmax,
                                 output_nonlinearity=lasagne.nonlinearities.softmax,
 
-                                eval_size=0.1,
+                                eval_size=0.01,
                                 
                                 on_epoch_finished=afterEpoch, 
 
@@ -456,34 +415,29 @@ class MyModel:
 
                                 # optimization method:
                                 update=nesterov_momentum,
-                                update_learning_rate=self.learn_rates,
+                                update_learning_rate=self.config.learn_rates,
                                 update_momentum=momentum,
                                 
                                 regression=False,  # flag to indicate we're dealing with regression problem
-                                max_epochs=self.epochs,  # we want to train this many epochs
+                                max_epochs=self.config.epochs,  # we want to train this many epochs
                                 verbose=1,
 
                                 #W=init.Normal()
                                 )  
 
-
-                #print 'Learning rate configuration; Pretrain:',learn_rates_pretrain,'Start learn rate supervised train:',learn_rates,'Decay:',learn_rate_decays,'Min:',learn_rate_minimums,'Momentum:',momentum
-                #print 'Dropout configured as:', dropouts
-
-            print 'fitting classifier...',self.deep_learner
+            print 'fitting classifier...',deep_learner
             clf.fit(X_train, y_train)
 
-            if self.deep_learner=='trees':
+            if deep_learner=='trees':
                 print clf.feature_importances_
                 serialize(clf.feature_importances_, 'models/feature_importances_iter'+str(iteration)+'.pickle')
             
             print 'done!'
 
-            if iteration < iterations-1:
+            if iteration < self.config.iterations-1:
                 #restrict samples to the ones that the classifier can correctly distinguish
                 y_train_clf = clf.predict(X_train)
                 mask = np.equal(y_train, y_train_clf)
-                #X_train = X_train[mask,]
                 y_train[mask] = self._no_langs
                 self._no_classes += 1
 
@@ -493,8 +447,8 @@ class MyModel:
         self._dbns,self._scalers,self.X_ids_train,self.X_ids_test,self.y_test_flat = [],[],None,None,None
 
         for i in xrange(no_classifiers):
-            print 'Train #',i,' dbn classifier with window_size:',window_sizes[i],'step_size=',step_sizes[i]
-            transforms,clf = self.trainClassifier(all_ids,classes,self.window_sizes[i],self.step_sizes[i],self.strides[i],self.pretrainepochs,self.epochs,hid_layer_units=self.hid_layer_units,random_state=self.random_state,learn_rates=self.learn_rates)
+            print 'Train #',i,' dbn classifier with window_size:',self.config.window_sizes[i],'step_size=',self.config.step_sizes[i]
+            transforms,clf = self.trainClassifier(all_ids,classes,self.config.window_sizes[i],self.config.step_sizes[i],self.config.strides[i],self.config.deep_learner)
             self._dbns.append(clf)
             self._transforms.append(transforms)
     
@@ -508,10 +462,10 @@ class MyModel:
 
         fused_proba = op(frame_proba)
         
-        if len(fused_proba) < self._no_langs:
-            fused_proba.resize((self._no_langs,))
-        elif len(fused_proba) > self._no_langs:
-            fused_proba = fused_proba[:self._no_langs]
+        if len(fused_proba) < self.config._no_langs:
+            fused_proba.resize((self.config._no_langs,))
+        elif len(fused_proba) > self.config._no_langs:
+            fused_proba = fused_proba[:self.config._no_langs]
 
         if normalize:
             return unspeech_utils.normalize_unitlength(fused_proba)
@@ -519,7 +473,7 @@ class MyModel:
             return fused_proba
 
     def inspect_predict(self,utterance_id):
-        clf,std_scale,pca,window_size,step_size,stride = self._dbns[0],self._scalers[0],self._pcas[0],self.window_sizes[0],self.step_sizes[0],self.strides[0]
+        clf,std_scale,pca,window_size,step_size,stride = self._dbns[0],self._scalers[0],self._pcas[0],self.config.window_sizes[0],self.config.step_sizes[0],self.config.strides[0]
         
         logspec_features = np.load(utterance_id+'.logspec.npy')
         
@@ -564,7 +518,7 @@ class MyModel:
     def predict_utterance(self,utterance_id):
         voting = []
         multi_pred = []
-        for clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._transforms,self.window_sizes,self.step_sizes,self.strides):
+        for clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
             utterance = loadIdFeat(utterance_id,'float32',window_size, step_size, stride)
            
             for transform in transforms:
@@ -575,25 +529,17 @@ class MyModel:
                 print 'Warning, training data was not float32: ', utterance.dtype
                 utterance = utterance.astype('float32', copy=False)
 
-            if self.deep_learner=='cnn':
+            #2D reshape for cnn
+            if self.config.deep_learner=='cnn':
                 utterance = utterance.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
 
             #hard decision per frame, agg with majority voting
-            #local_pred_all = clf.predict(utterance)
-            #local_vote = np.bincount(local_pred_all)          
-            #local_pred = np.argmax(local_vote)
             print 'calling classifier',utterance.dtype,utterance.shape
-            #soft desision, agg of probabilities
             frame_proba = clf.predict_proba(utterance)
-           
-            #if frame_proba.shape[0] > self._no_langs:
-            #    frame_proba = frame_proba[:self._no_langs]
-
+          
+            #todo remove non-sensical votes
             local_vote = self.fuse_op(frame_proba,op=scipy.stats.gmean)
             local_vote1 = self.fuse_op(frame_proba,op=majority_vote)
-
-            #local_vote1b = local_vote1
-
             local_vote2 = self.fuse_op(frame_proba,op=np.add.reduce)
             local_vote3 = self.fuse_op(frame_proba,op=np.multiply.reduce)
             local_vote4 = self.fuse_op(frame_proba,op=np.maximum.reduce)
@@ -636,26 +582,26 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--classes', dest='classes', help='comma seperated list of classes',type=str,default='de,fr')
     parser.add_argument('-m', '--max-samples', dest='max_samples', help='max utterance samples per language',type=int,default=-1)
     parser.add_argument('-b', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
-    parser.add_argument('-e', '--epochs',dest='epochs', help='number of supervised finetuning epochs', default = 20, type=int)
-    parser.add_argument('-p', '--pretrain-epochs',dest='pretrainepochs', help='number of unsupervised epochs', default = 10, type=int)
+    parser.add_argument('-e', '--max-epochs',dest='max_epochs', help='maximum number of supervised finetuning epochs', default = 1000, type=int)
     parser.add_argument('-s', '--save-model',dest='modelfilename', help='store trained model to this filename, if specified', default = '', type=str)
-    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in dbn', default = 0.0, type=float)
-    parser.add_argument('-u', '--hidden-layer-units',dest='hiddenlayerunits', help='dropout param in dbn', default = 1000, type=int)
+    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in cnn', default = '0.1,0.2,0.3,0.5', type=str)
+    parser.add_argument('-hu', '--hidden-layer-units',dest='hiddenlayerunits', help='number of fully dense hidden layer units', default = 512, type=int)
     parser.add_argument('-r', '--learnrate',dest='learnrate', help='learning rate', default = 0.01, type=float)
+    parser.add_argument('-mo', '--momentum',dest='momentum', help='momentum', default = 0.9, type=float)
     parser.add_argument('-l', '--deep-learner',dest='deep_learner', help='learning rate', default = 'nolearn', type=str)
     parser.add_argument('-g', '--gpu-id',dest='gpu_id', help='GPU board to use (defaults to 0)', default = 0, type=int)
+    parser.add_argument('-p', '--early-stopping-patience',dest='early_stopping_patience', help='wait this many epochs for a better result, otherwise stop training', default = 100, type=int)
+    parser.add_argument('-w', '--window-size',dest='window_size', help='window size', default='11',type=str)
     parser.add_argument('--with-sparsefiltering', dest='use_sparse', help='Use sparse filtering features', action='store_true', default=False)
     parser.add_argument('--pca', dest='use_pca', help='pca reduction of feature space', action='store_true', default=False)
     parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
+    args = parser.parse_args()
 
-    window_sizes = [11] #[11,15] #[15,26]#[11,21]
-    step_sizes = [2] #[5,7] #[10,17]#[7,15]
-    strides = [1] #[1,1]
+    window_sizes = [int(x) for x in args.window_size.split(',')]
+    step_sizes = [2] 
+    strides = [1]
 
     no_classifiers = len(window_sizes)
-
-    args = parser.parse_args()
-    gnumpy.board_id_to_use = args.gpu_id
 
     dataset_classes = (args.classes).split(',')
     class2num = {}
@@ -669,12 +615,30 @@ if __name__ == '__main__':
     all_ids, classes = load_set(dataset_classes,'train',args.max_samples,class2num)
     dev_ids, dev_classes = load_set(dataset_classes,'dev',args.max_samples,class2num)
 
-    model = MyModel(args.deep_learner,window_sizes,step_sizes,strides,class2num,use_sparseFiltering=args.use_sparse,use_pca=args.use_pca,pca_whiten=args.pca_whiten,pretrainepochs=args.pretrainepochs,epochs=args.epochs,dropouts=args.dropouts,hid_layer_units=args.hiddenlayerunits, learn_rates=args.learnrate)
-    model.fit(all_ids,classes)
+    args_dropouts = [float(x) for x in args.dropouts.split(',')]
 
-    if (args.modelfilename != ''):
-        serialize(model,args.modelfilename)
-        
+    config = ModelConfig(args.deep_learner,
+                        window_sizes,
+                        step_sizes,
+                        strides,
+                        class2num,
+                        max_epochs=args.max_epochs,
+                        use_sparseFiltering=args.use_sparse,
+                        use_pca=args.use_pca,
+                        pca_whiten=args.pca_whiten,
+                        pca_components=100,
+                        learn_rates=args.learnrate,
+                        momentum=args.momentum,
+                        minibatch_size=256,
+                        hid_layer_units=args.hiddenlayerunits,
+                        dropouts=args_dropouts,
+                        random_state=0,
+                        early_stopping_patience=args.early_stopping_patience,
+                        iterations=1) 
+
+    model = MyModel(config)
+    model.fit(all_ids,classes)
+       
     #aggregated predictions by geometric mean
     y_pred = []
     #multiple single predictions of the classifiers
@@ -699,3 +663,6 @@ if __name__ == '__main__':
     print class2num
     print 'Fused scores:'
     print_classificationreport(dev_classes, y_pred)
+    if (args.modelfilename != ''):
+        print 'serialzing model...'
+        serialize(model,args.modelfilename)
