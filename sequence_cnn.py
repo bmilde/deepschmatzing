@@ -22,20 +22,18 @@ from nolearn.lasagne import NeuralNet
 Conv2DLayer = layers.Conv2DLayer
 MaxPool2DLayer = layers.MaxPool2DLayer
 
+from lasagne.nonlinearities import rectify,softmax
+
 from sklearn.cross_validation import train_test_split
 from sklearn.cross_validation import StratifiedShuffleSplit
-from sklearn.metrics import classification_report
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report,recall_score,accuracy_score,confusion_matrix,roc_curve,roc_auc_score
+
 from sklearn.preprocessing import StandardScaler
-
 from sklearn.lda import LDA
-
 from sparse_filtering.sparse_filtering import SparseFiltering
 
 from sklearn.decomposition import RandomizedPCA
 from sklearn.ensemble import ExtraTreesClassifier
-
 from sklearn.ensemble import RandomForestClassifier
 
 import sklearn
@@ -46,7 +44,6 @@ from pylab import *
 import matplotlib.pyplot
 
 from utils import unspeech_utils,ZCA,mean_substract
-
 from feature_gen import energy,windowed_fbank
 
 import scipy.stats
@@ -143,7 +140,6 @@ def load(filename):
 
 # Load and construct feature vectors for a single logspec file id
 def loadIdFeat(myid,dtype, window_size, step_size,stride,energy_filter=1.2):
-    print 'loading:',myid
     logspec_features = np.load(myid+'.logspec.npy')
     if(logspec_features.dtype != dtype):
         logspec_features = logspec_features.astype(dtype, copy=False)
@@ -362,17 +358,21 @@ class MyModel:
                     hidden4_num_units=self.config.hid_layer_units, hidden5_num_units=self.config.hid_layer_units,
                     dropout4_p=self.config.dropouts[3],
                     output_num_units=self.config._no_classes, 
-
+                    
+                    conv1_nonlinearity = rectify, conv2_nonlinearity = rectify, conv3_nonlinearity = rectify,
+                    hidden4_nonlinearity = rectify, hidden5_nonlinearity = rectify,
                     output_nonlinearity=lasagne.nonlinearities.softmax,
                    
                     eval_size=0.01,
 
                     on_epoch_finished=[
-                        AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.0001),
-                        AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
+                        #AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.0001),
+                        #AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
                         EarlyStopping(patience=self.config.early_stopping_patience),
                     ],
 
+                    #update=rmsprop,
+                    #update_learning_rate=1.0,
                     update=nesterov_momentum,
                     update_learning_rate=theano.shared(float32(self.config.learn_rates)),
                     update_momentum=theano.shared(float32(self.config.momentum)),
@@ -502,9 +502,9 @@ class MyModel:
         show()
 
     #shows the train history of a neural net 
-    def plotTrainHistory():
-        train_loss = np.array([i["train_loss"] for i in net1.train_history_])
-        valid_loss = np.array([i["valid_loss"] for i in net1.train_history_])
+    def plotTrainHistory(net):
+        train_loss = np.array([i["train_loss"] for i in net.train_history_])
+        valid_loss = np.array([i["valid_loss"] for i in net.train_history_])
         pyplot.plot(train_loss, linewidth=3, label="train")
         pyplot.plot(valid_loss, linewidth=3, label="valid")
         pyplot.grid()
@@ -536,44 +536,110 @@ class MyModel:
             #hard decision per frame, agg with majority voting
             print 'calling classifier',utterance.dtype,utterance.shape
             frame_proba = clf.predict_proba(utterance)
-          
-            #todo remove non-sensical votes
-            local_vote = self.fuse_op(frame_proba,op=scipy.stats.gmean)
-            local_vote1 = self.fuse_op(frame_proba,op=majority_vote)
-            local_vote2 = self.fuse_op(frame_proba,op=np.add.reduce)
-            local_vote3 = self.fuse_op(frame_proba,op=np.multiply.reduce)
-            local_vote4 = self.fuse_op(frame_proba,op=np.maximum.reduce)
+            frame_proba_log = np.log(frame_proba)
 
-            voting += [local_vote,local_vote1,local_vote2,local_vote3,local_vote4]
-            multi_pred += [np.argmax(local_vote),np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote4)]
-        
+            #todo remove non-sensical votes
+            local_vote = self.fuse_op(frame_proba,op=scipy.stats.hmean)
+            local_vote1 = self.fuse_op(frame_proba,op=scipy.stats.gmean)
+            local_vote2 = self.fuse_op(frame_proba,op=majority_vote)
+            local_vote3 = self.fuse_op(frame_proba,op=np.add.reduce)
+            local_vote4 = self.fuse_op(frame_proba,op=np.multiply.reduce)
+            local_vote5 = self.fuse_op(frame_proba,op=np.maximum.reduce)
+            local_vote6 = self.fuse_op(frame_proba_log,op=np.add.reduce)
+            #local_vote3 = self.fuse_op(frame_proba,op=np.multiply.reduce)
+            #local_vote4 = self.fuse_op(frame_proba,op=np.maximum.reduce)
+
+            voting += [local_vote,local_vote1,local_vote2,local_vote3,local_vote4,local_vote5,local_vote6]
+            multi_pred += [np.argmax(local_vote),np.argmax(local_vote1),np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote4),np.argmax(local_vote5),np.argmax(local_vote6)]
+            multi_pred_names = ['hmean','gmean','majority_vote','add.reduce','multiply.reduce','maximum.reduce','log add.reduce']
+
         print voting
 
         #geometric mean of classifiers, majority voting on utterance
         pred = np.argmax(np.add.reduce(voting))
-        return pred,multi_pred 
+        return pred,multi_pred,multi_pred_names
 
+    def performance_on_set(self,dev_ids,dev_classes,class2num):
+        #aggregated predictions by geometric mean
+        y_pred = []
+        #multiple single predictions of the classifiers
+        y_multi_pred = []
+
+        print 'Performance on dev set:'
+
+        multi_pred_names = []
+
+        #now test on heldout ids (dev set)
+        for myid in dev_ids:
+            print 'testing',myid
+            pred,multi_pred,multi_pred_names = model.predict_utterance(myid)
+            y_multi_pred.append(multi_pred)
+            y_pred.append(pred)
+
+        print class2num
+        print 'Single classifier performance scores:'
+        for i in xrange(len(multi_pred)):
+            print 'Pred #',i,multi_pred_names[i],':'
+            #print 'Window size', window_sizes[i],'step size',step_sizes[i]
+            print_classificationreport(dev_classes, [pred[i] for pred in y_multi_pred])
+            print '*'*50
+            print ' '*50
+        print '+'*50
+        print ' '*50
+        print ' '*50
+        print class2num
+        print 'Fused scores:'
+        print_classificationreport(dev_classes, y_pred)
+        return recall_score(dev_classes, y_pred, average='macro')
+         
 '''generic classification report for real_classes vs. predicted_classes'''
 def print_classificationreport(real_classes, predicted_classes):
-    print "Accuracy:", accuracy_score(real_classes, predicted_classes)
-    print "Classification report:"
+    print 'Unweighted accuracy:', accuracy_score(real_classes, predicted_classes)
+    print 'Unweighted recall:', recall_score(real_classes, predicted_classes, average='macro')
+    print 'Classification report:'
     print classification_report(real_classes, predicted_classes)
-    print "Confusion matrix:\n%s" % confusion_matrix(real_classes, predicted_classes)
+    print 'Confusion matrix:\n%s' % confusion_matrix(real_classes, predicted_classes)
 
 '''return the given set, with classes and name (usually train, dev, or test), as tuple of ids (list) and matching classes (list)'''
-def load_set(classes,name,max_samples,class2num):
+def load_set(classes,name,max_samples,class2num,withSpeakerInfo=False):
     print classes
     
-    set_ids = []
-    set_classes = [] 
-    
+    list_ids = []
+    list_classes = [] 
+    list_speakers = []
+
     for myclass in classes:
         print myclass,name
-        ids = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir)
-        for myid in ids[:max_samples]:
-            set_ids.append(myid)
-            set_classes.append(class2num[myclass])
-    return set_ids,set_classes
+        if withSpeakerInfo:
+            ids,speakers = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir,withSpeakerInfo=True)
+        else:
+            ids = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir)
+        if max_samples != -1:
+            ids = ids[:max_samples]
+            if withSpeakerInfo:
+                speakers = speakers[:max_samples]
+        
+        for myid,speaker in zip(ids,speakers):
+            list_ids.append(myid)
+            list_classes.append(class2num[myclass])
+            list_speakers.append(speaker)
+
+    return list_ids,list_classes,list_speakers
+
+def train_dev_split(all_ids, classes, speakers, dev_speaker_sel):
+    train_ids, train_classes, train_speakers, dev_ids, dev_classes, dev_speakers = [],[],[],[],[],[]
+
+    for myid,myclass,speaker in zip(all_ids, classes, speakers):
+        print myid,myclass,speaker
+        if speaker in dev_speaker_sel:
+            dev_ids += [myid]
+            dev_classes += [myclass]
+            dev_speakers += [speaker]
+        else:
+            train_ids += [myid]
+            train_classes += [myclass]
+            train_speakers += [speaker]
+    return train_ids, train_classes, train_speakers, dev_ids, dev_classes, dev_speakers
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calculate FBANK features (=logarithmic mel frequency filter banks) for all supplied files in file list (txt).')
@@ -591,17 +657,18 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--deep-learner',dest='deep_learner', help='learning rate', default = 'nolearn', type=str)
     parser.add_argument('-g', '--gpu-id',dest='gpu_id', help='GPU board to use (defaults to 0)', default = 0, type=int)
     parser.add_argument('-p', '--early-stopping-patience',dest='early_stopping_patience', help='wait this many epochs for a better result, otherwise stop training', default = 100, type=int)
-    parser.add_argument('-w', '--window-size',dest='window_size', help='window size', default='11',type=str)
+    parser.add_argument('-cv', '--loso-cv', dest='loso_cv' , help='no development set, create training/test splits for leave-one-speaker-out cross-validation (LOSO-CV) on the training set. Requires speaker information.', action='store_true', default=False)
+    parser.add_argument('-t', '--test-speakers',dest='test_speakers', help='list of test speakers instead of a development or test set', default='',type=str)
+    parser.add_argument('-w', '--window-size',dest='window_size', help='single window size or list of window sizes', default='11',type=str)
     parser.add_argument('--with-sparsefiltering', dest='use_sparse', help='Use sparse filtering features', action='store_true', default=False)
     parser.add_argument('--pca', dest='use_pca', help='pca reduction of feature space', action='store_true', default=False)
     parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
     args = parser.parse_args()
 
     window_sizes = [int(x) for x in args.window_size.split(',')]
+    no_classifiers = len(window_sizes)
     step_sizes = [2] 
     strides = [1]
-
-    no_classifiers = len(window_sizes)
 
     dataset_classes = (args.classes).split(',')
     class2num = {}
@@ -609,11 +676,27 @@ if __name__ == '__main__':
         class2num[myclass] = i
     
     no_classes = len(dataset_classes)
-
     print 'classes:',dataset_classes
 
-    all_ids, classes = load_set(dataset_classes,'train',args.max_samples,class2num)
-    dev_ids, dev_classes = load_set(dataset_classes,'dev',args.max_samples,class2num)
+    all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, True)
+  
+    print 'classes:',set(classes)
+    print 'first view data elements:',zip(all_ids, classes, speakers)[:10]
+
+    print len(all_ids),len(classes),len(speakers)
+
+    if args.test_speakers != '':
+        dev_speaker_sel = (args.test_speakers).split(',')
+        train_ids, train_classes, train_speakers, dev_ids, dev_classes, dev_speakers = train_dev_split(all_ids, classes, speakers, dev_speaker_sel)
+        if len(dev_speakers) == 0:
+            print 'Speakers:',args.test_speakers,'not found'
+            print 'Choose one or more of:',set(train_speakers)
+            sys.exit(-1)
+        print 'Train speakers:',set(train_speakers),'dev speakers:',set(dev_speakers)
+        print 'Train classes:',set(train_classes),'dev classes:',set(dev_classes)
+    else:
+        train_ids, train_classes, train_speakers = all_ids, classes, speakers
+        dev_ids, dev_classes, dev_speakers = load_set(dataset_classes,'dev',args.max_samples,class2num, True)
 
     args_dropouts = [float(x) for x in args.dropouts.split(',')]
 
@@ -637,32 +720,9 @@ if __name__ == '__main__':
                         iterations=1) 
 
     model = MyModel(config)
-    model.fit(all_ids,classes)
-       
-    #aggregated predictions by geometric mean
-    y_pred = []
-    #multiple single predictions of the classifiers
-    y_multi_pred = []
+    model.fit(train_ids,train_classes)
+    model.performance_on_set(dev_ids,dev_classes,class2num)
 
-    print 'Performance on dev set:'
-
-    #now test on heldout ids (dev set)
-    for myid in dev_ids:
-        print 'testing',myid
-        pred,multi_pred = model.predict_utterance(myid)
-        y_multi_pred.append(multi_pred)
-        y_pred.append(pred)
-
-    print class2num
-    print 'Single classifier performance scores:'
-    for i in xrange(len(multi_pred)):
-        print 'Pred #',i,':'
-        #print 'Window size', window_sizes[i],'step size',step_sizes[i]
-        print_classificationreport(dev_classes, [pred[i] for pred in y_multi_pred])
-    print '+'*50
-    print class2num
-    print 'Fused scores:'
-    print_classificationreport(dev_classes, y_pred)
     if (args.modelfilename != ''):
         print 'serialzing model...'
         serialize(model,args.modelfilename)

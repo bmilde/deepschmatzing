@@ -15,10 +15,21 @@ def ensure_dir(f):
     if not os.path.exists(d):
         os.makedirs(d)
 
-def loadIdFile(idfile,basedir='./',use_no_files=-1):
+def loadIdFile(idfile,basedir='./',use_no_files=-1,withSpeakerInfo=False):
     ids = []
     with open(idfile) as f:
-        ids = f.read().split('\n')[:use_no_files]
+        if withSpeakerInfo:
+            lines = f.read().splitlines()
+            ids = [line.split(' ')[0] for line in lines]
+            speakers = [line.split(' ')[1] for line in lines]
+        else:
+            ids = f.read().splitlines()
+
+    if use_no_files != -1:
+        ids = ids[:use_no_files]
+        if withSpeakerInfo:
+            speakers = speakers[:use_no_files]
+
     #check if ids exist
     #ids = [myid for myid in ids if os.path.ispath(myid)]
 
@@ -28,7 +39,10 @@ def loadIdFile(idfile,basedir='./',use_no_files=-1):
     #remove .wav extension if it exists
     ids = [(myid[:-4] if myid.endswith('.wav') else myid) for myid in ids]
     
-    return ids
+    if withSpeakerInfo:
+        return ids,speakers
+    else:
+        return ids
 
 def getSignal(utterance):
     spf = wave.open(utterance, 'r')
