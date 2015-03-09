@@ -18,7 +18,7 @@ from utils import unspeech_utils
 
 def genLogspecForId(myid,nofilts,framerate,windowlen):
     signal, sampling_rate = unspeech_utils.getSignal(myid+'.wav')
-    extractor = mfcc.MFCC(nfilt=nofilts,frate = framerate, wlen=windowlen, samprate=sampling_rate)
+    extractor = mfcc.MFCC(nfilt=nofilts,frate = framerate, wlen=windowlen, samprate=sampling_rate, ncep=40,lowerf=64, upperf=8000)
     feat = extractor.sig2logspec(signal)
     np.save(myid+'.logspec', feat)
 
@@ -36,7 +36,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--frate',dest='frate', help='number of frames per minute (int, default:100)', default = 100, type=int)
     parser.add_argument('-n', '--nfilt',dest='nfilt', help='number of filter banks (int, default:40)', default = 40, type=int)
     parser.add_argument('-w', '--window',dest='wlen', help='size of window, in seconds. (float, default:0.0256)', default = 0.0256, type=float)    
-    parser.add_argument('-b', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
+    parser.add_argument('-bdir', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
 
     args = parser.parse_args()
     ids = unspeech_utils.loadIdFile(args.filelist,basedir=args.basedir)
