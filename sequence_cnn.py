@@ -3,6 +3,8 @@ import argparse
 import numpy as np
 import theano
 import lasagne
+import functools
+
 #higher recrusion limit for large models
 sys.setrecursionlimit(10000)
 
@@ -131,6 +133,9 @@ def afterEpoch(nn, train_history):
 def majority_vote(proba):
     return np.bincount(np.argmax(proba, axis=1))
 
+def weighted_majority_vote(proba,weights):
+    return np.bincount(np.argmax(proba, axis=1),weights=weights)
+
 def serialize(data, filename):
     with open(filename, 'wb') as f:
         pickle.dump(data, f, protocol=-1)
@@ -195,7 +200,7 @@ def loadTrainData(ids,classes,window_size,step_size,stride):
 
 #Model configurration hyper parameters
 class ModelConfig:
-    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=1000,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm'):
+    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=1000,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',use_linear_confidence = False):
         self.deep_learner = learner
         
         #feature generation and class config
@@ -205,6 +210,7 @@ class ModelConfig:
         self.pca_components = pca_components
         self.class2num = class2num
         self.max_epochs = max_epochs
+        self.epochs = max_epochs
         self._no_langs = len(class2num.keys())
         self._no_classes = self._no_langs
         self.use_pca = use_pca
@@ -233,18 +239,24 @@ class ModelConfig:
 
         self.iterations = 1
 
+        self.use_linear_confidence = use_linear_confidence
+
 #Model class that can be pickeled and once trained can be used for classification
 class MyModel:
     def __init__(self, config):
         self._transforms = []
         self._dbns = []
+        self._confidences = []
         self.baseline_clf = None
         self.baseline_transforms = []
         self.config = config
     
     def trainBaseline(self,ids,classes):
         print 'Using',self.config.baselineClassifier,'as baseline classifier'
-        
+       
+        if self.config.baselineClassifier.lower() == 'none':
+            return
+
         X = loadBaselineData(ids)
         y = np.array(classes,dtype=np.int32)
 
@@ -285,11 +297,11 @@ class MyModel:
                         output_num_units=self.config._no_classes,
                         output_nonlinearity=lasagne.nonlinearities.softmax,
 
-                        eval_size=0.01,
+                        eval_size=0.0,
 
                         on_epoch_finished=[AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.0001),
-                                            AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
-                                            EarlyStopping(patience=self.config.early_stopping_patience)],
+                                            AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),],
+                                            #EarlyStopping(patience=self.config.early_stopping_patience)],
                         #batch_iterator_test=MyBatchIterator(128,forced_even=True),
                         #batch_iterator_train=MyBatchIterator(128,forced_even=True),
 
@@ -310,7 +322,7 @@ class MyModel:
 
         print 'Configured baseline clf to:',self.baseline_clf
 
-        if self.baseline_clf:
+        if self.baseline_clf!=None:
             self.baseline_clf.fit(X,y)
 
     #Prepare corpus/generate (raw) features and train classifier
@@ -538,6 +550,16 @@ class MyModel:
             
             print 'done!'
 
+            confidence_clf = None
+            if self.config.use_linear_confidence:
+                #trains a linear regression model predicting confidence of
+                y_train_clf_proba = clf.predict_proba(X_train)
+                y_train_clf = np.argmax(y_train_clf_proba, axis=1) 
+                mask = np.equal(y_train, y_train_clf)
+                confidence_clf = linear_model.Ridge(alpha = .5)
+                confidence_y = mask.astype(np.float32)
+                confidence_clf.fit(y_train_clf_proba,confidence_y)
+            
             if iteration < self.config.iterations-1:
                 #restrict samples to the ones that the classifier can correctly distinguish
                 y_train_clf = clf.predict(X_train)
@@ -545,27 +567,20 @@ class MyModel:
                 y_train[mask] = self._no_langs
                 self._no_classes += 1
 
-            #if self.config.use_linear_confidence:
-            #    #trains a linear regression model predicting confidence of
-            #    y_train_clf_proba = clf.predict_proba(X_train)
-            #    y_train_clf = 
-            #    mask = np.equal(y_train, y_train_clf)
-            #    clf = linear_model.Ridge (alpha = .5)
-            #    .astype(np.float32)
-
-        return (std_scale,pca,transform_clf),clf
+        return (std_scale,pca,transform_clf),clf,confidence_clf
 
     def fit(self,all_ids,classes):
         self._dbns,self._scalers,self.X_ids_train,self.X_ids_test,self.y_test_flat = [],[],None,None,None
 
-        print 'len ids:', len(all_ids), 'classes:', len(classes)
+        #print 'len ids:', len(all_ids), 'classes:', len(classes)
 
         for i in xrange(no_classifiers):
             if self.config.deep_learner:
                 print 'Train #',i,' dbn classifier with window_size:',self.config.window_sizes[i],'step_size=',self.config.step_sizes[i]
-                transforms,clf = self.trainClassifier(all_ids,classes,self.config.window_sizes[i],self.config.step_sizes[i],self.config.strides[i],self.config.deep_learner)
+                transforms,clf,confidence_clf = self.trainClassifier(all_ids,classes,self.config.window_sizes[i],self.config.step_sizes[i],self.config.strides[i],self.config.deep_learner)
                 self._dbns.append(clf)
                 self._transforms.append(transforms)
+                self._confidences.append(confidence_clf)
         if self.config.computeBaseline:
             self.trainBaseline(all_ids,classes)
     
@@ -651,7 +666,7 @@ class MyModel:
         
         voting = []
         multi_pred = []
-        for clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
+        for clf,confidence_clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._confidences,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
             utterance = loadIdFeat(utterance_id,'float32',window_size, step_size, stride)
            
             for transform in transforms:
@@ -667,31 +682,43 @@ class MyModel:
                 utterance = utterance.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
 
             #hard decision per frame, agg with majority voting
-            print 'calling classifier',utterance.dtype,utterance.shape
+            #print 'calling classifier',utterance.dtype,utterance.shape
             frame_proba = clf.predict_proba(utterance)
             frame_proba_log = np.log(frame_proba)
 
             #todo remove non-sensical votes
-            local_vote = self.fuse_op(frame_proba,op=scipy.stats.hmean)
+            #local_vote = self.fuse_op(frame_proba,op=scipy.stats.hmean)
             local_vote1 = self.fuse_op(frame_proba,op=scipy.stats.gmean)
             local_vote2 = self.fuse_op(frame_proba,op=majority_vote)
-            local_vote3 = self.fuse_op(frame_proba,op=np.add.reduce)
-            local_vote4 = self.fuse_op(frame_proba,op=np.multiply.reduce)
-            local_vote5 = self.fuse_op(frame_proba,op=np.maximum.reduce)
+
+            if confidence_clf:
+                weights = confidence_clf.predict(frame_proba)
+                frame_proba_weighted = frame_proba * np.array([weights]).T
+                local_vote3 = self.fuse_op(frame_proba_weighted,op=np.add.reduce)
+            else:
+                local_vote3 = self.fuse_op(frame_proba,op=np.add.reduce)
+            
+            if confidence_clf:
+                local_vote4 = self.fuse_op(frame_proba,op=functools.partial(weighted_majority_vote,weights=weights))
+            else:
+                local_vote4 = self.fuse_op(frame_proba,op=np.multiply.reduce)
+
+            #local_vote5 = self.fuse_op(frame_proba,op=np.maximum.reduce)
             local_vote6 = self.fuse_op(frame_proba_log,op=np.add.reduce)
             #local_vote3 = self.fuse_op(frame_proba,op=np.multiply.reduce)
             #local_vote4 = self.fuse_op(frame_proba,op=np.maximum.reduce)
 
-            voting += [local_vote,local_vote1,local_vote2,local_vote3,local_vote4,local_vote5,local_vote6]
-            multi_pred += [np.argmax(local_vote),np.argmax(local_vote1),np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote4),np.argmax(local_vote5),np.argmax(local_vote6)]
-            multi_pred_names = ['hmean','gmean','majority_vote','add.reduce','multiply.reduce','maximum.reduce','log add.reduce']
+            voting += [local_vote1,local_vote2,local_vote3,local_vote6]
+            multi_pred += [np.argmax(local_vote1),np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote6)]
+            #multi_pred_names = ['hmean','gmean','majority_vote','add.reduce','multiply.reduce','maximum.reduce','log add.reduce']
+            multi_pred_names = ['gmean','majority_vote','weighted majority add' if confidence_clf else 'add','weighted majority vote' if confidence_clf else 'mul','log add.reduce']
 
-        print voting
+        #print voting
 
-        #geometric mean of classifiers, majority voting on utterance
+        #majority probability voting on utterance
         pred = np.argmax(np.add.reduce(voting))
         return pred,multi_pred,multi_pred_names
-
+   
     def performance_on_set(self,dev_ids,dev_classes,class2num):
         #aggregated predictions by geometric mean
         y_pred = []
@@ -702,26 +729,32 @@ class MyModel:
 
         return_recall_score = 0
 
+        #2 class labels out of a multiclass problem, i.e. 0 is one class and 1 is everything else
+        dev_classes_2class = (np.array(dev_classes)!=0).astype(np.int32)
+
         if self.baseline_clf:
-            
+
             X = loadBaselineData(dev_ids)
-            
+
             for scaler in self.baseline_transforms:
                 scaler.transform(X)
 
             X = X.astype(np.float32)
 
-            y_pred = self.baseline_clf.predict(X) 
-            return_recall_score = recall_score(dev_classes, y_pred, average='macro')
+            y_pred_baseline = self.baseline_clf.predict(X)
+            return_recall_score = recall_score(dev_classes, y_pred_baseline, average='macro', pos_label=None)
             print 'Baseline: '
-            print_classificationreport(dev_classes, y_pred)
+            print_classificationreport(dev_classes, y_pred_baseline)
+            print 'Baseline 2-class: '
+            print_classificationreport(dev_classes_2class, (np.array(y_pred_baseline)!=0).astype(np.int32))
+        
 
         if self._dbns:
             multi_pred_names = []
 
             #now test on heldout ids (dev set)
             for myid in dev_ids:
-                print 'testing',myid
+                #print 'testing',myid
                 pred,multi_pred,multi_pred_names = model.predict_utterance(myid)
                 y_multi_pred.append(multi_pred)
                 y_pred.append(pred)
@@ -731,22 +764,30 @@ class MyModel:
             for i in xrange(len(multi_pred)):
                 print 'Pred #',i,multi_pred_names[i],':'
                 #print 'Window size', window_sizes[i],'step size',step_sizes[i]
-                print_classificationreport(dev_classes, [pred[i] for pred in y_multi_pred])
+                prediction = [pred[i] for pred in y_multi_pred]
+                prediction_2class = (np.array(prediction)!=0).astype(np.int32)
+                print_classificationreport(dev_classes, prediction)
+                print '+'*50
+                print 'Pred #',i,multi_pred_names[i],' 2-class :'
+                print_classificationreport(dev_classes_2class, prediction_2class)
                 print '*'*50
                 print ' '*50
-            print '+'*50
+            print '*'*50
             print ' '*50
             print ' '*50
             print class2num
             print 'Fused scores:'
             print_classificationreport(dev_classes, y_pred)
-            return_recall_score = recall_score(dev_classes, y_pred, average='macro')
+            print 'Fused scores 2-class:'
+            print_classificationreport(dev_classes_2class, (np.array(y_pred)!=0).astype(np.int32))
+
+            return_recall_score = recall_score(dev_classes, y_pred, average='macro', pos_label=None)
         return return_recall_score
-         
+        
 '''generic classification report for real_classes vs. predicted_classes'''
 def print_classificationreport(real_classes, predicted_classes):
     print 'Unweighted accuracy:', accuracy_score(real_classes, predicted_classes)
-    print 'Unweighted recall:', recall_score(real_classes, predicted_classes, average='macro')
+    print 'Unweighted recall:', recall_score(real_classes, predicted_classes, average='macro', pos_label=None)
     print 'Classification report:'
     print classification_report(real_classes, predicted_classes)
     print 'Confusion matrix:\n%s' % confusion_matrix(real_classes, predicted_classes)
@@ -801,6 +842,7 @@ if __name__ == '__main__':
     parser.add_argument('-bdir', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
     parser.add_argument('-b', '--baseline',dest='baseline', help='compute baseline with this classifier (svm,randomforest,dnn)', default = 'svm', type=str)
     parser.add_argument('-bonly', '--baseline-only',dest='baseline_only', help='compute only baseline, specify classifier with -b', action='store_true', default = False)
+    parser.add_argument('-lc','--use_linear_confidence',dest='use_linear_confidence',help='use linear confidence', action='store_true', default = False)
     parser.add_argument('-e', '--max-epochs',dest='max_epochs', help='maximum number of supervised finetuning epochs', default = 1000, type=int)
     parser.add_argument('-s', '--save-model',dest='modelfilename', help='store trained model to this filename, if specified', default = '', type=str)
     parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in cnn', default = '0.1,0.2,0.3,0.5', type=str)
@@ -836,7 +878,7 @@ if __name__ == '__main__':
     print 'classes:',set(classes)
     print 'first view data elements:',zip(all_ids, classes, speakers)[:10]
 
-    print len(all_ids),len(classes),len(speakers)
+    #print len(all_ids),len(classes),len(speakers)
 
     if args.test_speakers != '':
         dev_speaker_sel = (args.test_speakers).split(',')
@@ -875,7 +917,8 @@ if __name__ == '__main__':
                         early_stopping_patience=args.early_stopping_patience,
                         iterations=1,
                         computeBaseline=(args.baseline != ''),
-                        baselineClassifier = args.baseline) 
+                        baselineClassifier = args.baseline,
+                        use_linear_confidence = args.use_linear_confidence) 
 
     model = MyModel(config)
     model.fit(train_ids,train_classes)

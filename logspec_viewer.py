@@ -29,7 +29,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-f', '--filelist', dest="filelist", help='Process this file list, txt format. Omit filetype.', default='test_ids/nachrichten_1h', type=str)
     parser.add_argument('-i', '--inspect-id', dest='inspect_id', help='inspect this id instead of computing units', default=-1, type=int)
-    parser.add_argument('-b', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
+    parser.add_argument('-bdir', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
 
     args = parser.parse_args()
     ids = unspeech_utils.loadIdFile(args.filelist,args.basedir)
