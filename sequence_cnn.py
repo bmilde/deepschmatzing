@@ -48,7 +48,7 @@ from sklearn import linear_model
 from pylab import *
 import matplotlib.pyplot
 
-from utils import unspeech_utils,ZCA,mean_substract
+from utils import unspeech_utils,mean_substract
 from feature_gen import energy,windowed_fbank
 
 import scipy.stats
