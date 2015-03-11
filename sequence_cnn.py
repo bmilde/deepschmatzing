@@ -674,7 +674,7 @@ class MyModel:
                     utterance = transform.transform(utterance)
 
             if(utterance.dtype != 'float32'):
-                print 'Warning, training data was not float32: ', utterance.dtype
+                #print 'Warning, training data was not float32: ', utterance.dtype
                 utterance = utterance.astype('float32', copy=False)
 
             #2D reshape for cnn
