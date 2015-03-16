@@ -3,6 +3,8 @@ import argparse
 import numpy as np
 import theano
 import lasagne
+from lasagne_addon import *
+
 import functools
 
 #higher recrusion limit for large models
@@ -483,6 +485,7 @@ class MyModel:
                     max_epochs=self.config.max_epochs,
                     verbose=1,
                     
+                    W=ReluNormal()
                     #W=init.Uniform() 
                     )
             else:
