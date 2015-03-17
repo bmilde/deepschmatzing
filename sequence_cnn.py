@@ -18,6 +18,7 @@ from sklearn import svm
 from lasagne.updates import *
 from nolearn.lasagne import NeuralNet
 
+from nolearn_addon import *
 #these would be faster for 
 #try:
 #from lasagne.layers.cuda_convnet import Conv2DCCLayer as Conv2DLayer
@@ -63,69 +64,6 @@ import dill as pickle
 def float32(k):
     return np.cast['float32'](k)
 
-class EarlyStopping(object):
-    def __init__(self, patience=100):
-        self.patience = patience
-        self.best_valid = np.inf
-        self.best_valid_epoch = 0
-        self.best_weights = None
-
-    def __call__(self, nn, train_history):
-        current_valid = train_history[-1]['valid_loss']
-        current_epoch = train_history[-1]['epoch']
-        if current_valid < self.best_valid:
-            self.best_valid = current_valid
-            self.best_valid_epoch = current_epoch
-            self.best_weights = [w.get_value() for w in nn.get_all_params()]
-        elif self.best_valid_epoch + self.patience < current_epoch:
-            print("Early stopping.")
-            print("Best valid loss was {:.6f} at epoch {}.".format(
-                self.best_valid, self.best_valid_epoch))
-            nn.load_weights_from(self.best_weights)
-            raise StopIteration()
-
-class AdjustVariable(object):
-    def __init__(self, name, start=0.03, stop=0.001):
-        self.name = name
-        self.start, self.stop = start, stop
-        self.ls = None
-
-    def __call__(self, nn, train_history):
-        if self.ls is None:
-            self.ls = np.linspace(self.start, self.stop, nn.max_epochs)
-
-        epoch = train_history[-1]['epoch']
-        new_value = float32(self.ls[epoch - 1])
-        getattr(nn, self.name).set_value(new_value)
-
-#custom batch iterator for nolearn, that iterates in <minibatch> chunks
-class ForcedEvenBatchIterator(object):
-    def __init__(self, batch_size, forced_even=False):
-        self.batch_size = batch_size
-        self.forced_even = forced_even
-
-    def __call__(self, X, y=None, test=False):
-        self.X, self.y = X, y
-        self.test = test
-        return self
-
-    def __iter__(self):
-        n_samples = self.X.shape[0]
-        bs = self.batch_size
-        for i in range((n_samples + bs - 1) / bs):
-            sl = slice(i * bs, (i + 1) * bs)
-            Xb = self.X[sl]
-            if self.forced_even and len(Xb) != bs:
-                continue
-            if self.y is not None:
-                yb = self.y[sl]
-            else:
-                yb = None
-            yield self.transform(Xb, yb)
-
-    def transform(self, Xb, yb):
-        return Xb, yb
-
 def afterEpoch(nn, train_history):
     #np.set_printoptions(threshold='nan')
     weights = [w.get_value() for w in nn.get_all_params()]
@@ -159,8 +97,6 @@ def loadIdFeat(myid,dtype, window_size, step_size, stride, energy_filter=1.2):
     return feat
 
 def loadBaselineData(ids):
-    print 'Loading', len(ids), 'baseline ids'
-    
     feat_list = []
     for utterance_id in ids:
         utt_feat = np.load(utterance_id+'.baseline_feat.npy')
@@ -171,7 +107,7 @@ def loadBaselineData(ids):
     return X
 
 # Load specgrams and generate windowed feature vectors
-def loadTrainData(ids,classes,window_size,step_size,stride):
+def loadTrainData(ids,classes,window_size,step_size,stride,baseline_X=None):
     
     #iterate through all files and find out the space needed to store all data in memory
     required_shape = [0,0]
@@ -187,8 +123,13 @@ def loadTrainData(ids,classes,window_size,step_size,stride):
     X_data = np.zeros(required_shape,dtype='float32')
     y_data = np.zeros(required_shape[0],dtype='uint8')
 
+    if baseline_X != None:
+        X2_data = np.zeros((required_shape[0],baseline_X.shape[1]),dtype='float32')
+
     #now we will load the npy files into memory and generate features
     pos = 0
+    i = 0
+
     for myid,myclass in itertools.izip(ids,classes):
             feat = loadIdFeat(myid,'float32',window_size,step_size,stride)
             feat_len = feat.shape[0]
@@ -196,13 +137,20 @@ def loadTrainData(ids,classes,window_size,step_size,stride):
             y_data[pos:pos+feat_len] = myclass
             X_data[pos:pos+feat_len] = feat 
 
-            pos += feat_len
+            if baseline_X != None:
+                X2_data[pos:pos+feat_len] = baseline_X[i]
 
-    return X_data,y_data
+            pos += feat_len
+            i +=1
+
+    if baseline_X == None:
+        return X_data,y_data
+    else:
+        return X_data,X2_data,y_data
 
 #Model configurration hyper parameters
 class ModelConfig:
-    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=1000,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',use_linear_confidence = False):
+    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=1000,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',mergeBaseline = False,use_linear_confidence = False, weightsFile=''):
         self.deep_learner = learner
         
         #feature generation and class config
@@ -241,7 +189,9 @@ class ModelConfig:
 
         self.iterations = 1
 
+        self.mergeBaseline = mergeBaseline
         self.use_linear_confidence = use_linear_confidence
+        self.weightsFile = weightsFile
 
 #Model class that can be pickeled and once trained can be used for classification
 class MyModel:
@@ -274,8 +224,17 @@ class MyModel:
         if self.config.baselineClassifier.lower() == 'dnn':
             y = y.astype(np.int32)
             X = X.astype(np.float32)
+            unspeech_utils.shuffle_in_unison(X,y)
             print 'classes:',self.config._no_classes,'hid layers:',self.config.hid_layer_units
-            self.baseline_clf = NeuralNet(
+            self.baseline_clf = self.stdDnn((None, X.shape[1]))
+
+        print 'Configured baseline clf to:',self.baseline_clf
+
+        if self.baseline_clf!=None:
+            self.baseline_clf.fit(X,y)
+
+    def stdDnn(self,input_shape):
+        return NeuralNet(
                 layers=[  # three layers: one hidden layer
                         ('input', layers.InputLayer),
                         ('hidden1', layers.DenseLayer),
@@ -288,10 +247,10 @@ class MyModel:
                         # layer parameters:
 
                         hidden1_nonlinearity = rectify, hidden2_nonlinearity = rectify, hidden3_nonlinearity = rectify,
-                        dropout1_p=self.config.dropouts[0],
-                        dropout2_p=self.config.dropouts[1],
+                        dropout1_p=0.5,
+                        dropout2_p=0.5,
 
-                        input_shape=(None, X.shape[1]),  # a x b input pixels per batch
+                        input_shape=input_shape,  # a x b input pixels per batch
                         hidden1_num_units=self.config.hid_layer_units,  # number of units in hidden layer
                         hidden2_num_units=self.config.hid_layer_units,  # number of units in hidden layer
                         hidden3_num_units=self.config.hid_layer_units,  # number of units in hidden layer
@@ -322,11 +281,6 @@ class MyModel:
                         verbose=1,
                         ) 
 
-        print 'Configured baseline clf to:',self.baseline_clf
-
-        if self.baseline_clf!=None:
-            self.baseline_clf.fit(X,y)
-
     #Prepare corpus/generate (raw) features and train classifier
     def trainClassifier(self,all_ids,classes,window_size,step_size,stride,deep_learner):
         
@@ -350,9 +304,10 @@ class MyModel:
             print 'Warning, training data was not float32 after mean substract: ', X_train.dtype
             X_train = X_train.astype('float32', copy=False)
 
-        np.save('data/X_train',X_train)
-        np.save('data/y_train',y_train)
-        np.save('data/X_train_mean',std_scale._mean)
+        #todo: switch to enable data caching / saving
+        #np.save('data/X_train',X_train)
+        #np.save('data/y_train',y_train)
+        #np.save('data/X_train_mean',std_scale._mean)
 
         for iteration in xrange(self.config.iterations):
             print 'iteration ', iteration,'/',self.config.iterations
@@ -387,8 +342,8 @@ class MyModel:
                 print 'Shape after transform: ',X_train.shape
                 print 'ytrain shape:',y_train.shape
 
-            if self.config.use_pca or self.config.use_lda or self.config.use_sparseFiltering:
-                np.save('data/X_train_transformed',X_train)
+            #if self.config.use_pca or self.config.use_lda or self.config.use_sparseFiltering:
+            #    np.save('data/X_train_transformed',X_train)
 
             #shuffle training vectors (inplace) for minibatch gradient descent optimisers
             unspeech_utils.shuffle_in_unison(X_train,y_train)
@@ -485,9 +440,11 @@ class MyModel:
                     max_epochs=self.config.max_epochs,
                     verbose=1,
                     
-                    W=ReluNormal()
+                    #w=ReluNormal()
                     #W=init.Uniform() 
                     )
+                if self.config.weightsFile != '':
+                    clf.load_weights_from(self.config.weightsFile)
             else:
 
                 y_train = y_train.astype(np.int32)
@@ -497,52 +454,8 @@ class MyModel:
 
                 print 'X_train type:', X_train.dtype
                 print 'y_train type:', y_train.dtype
-
-                clf = NeuralNet(
-                        layers=[  # three layers: one hidden layer
-                                ('input', layers.InputLayer),
-                                ('hidden1', layers.DenseLayer),
-                                ('dropout1', layers.DropoutLayer),
-                                ('hidden2', layers.DenseLayer),
-                                ('dropout2', layers.DropoutLayer),
-                                ('hidden3', layers.DenseLayer),
-                                ('output', layers.DenseLayer),
-                                ],
-                                # layer parameters:
-
-                                hidden1_nonlinearity = rectify, hidden2_nonlinearity = rectify, hidden3_nonlinearity = rectify,
-                                dropout1_p=self.config.dropouts[0],
-                                dropout2_p=self.config.dropouts[1],
-
-                                input_shape=(None, X_train.shape[1]),  # a x b input pixels per batch
-                                hidden1_num_units=self.config.hid_layer_units,  # number of units in hidden layer
-                                hidden2_num_units=self.config.hid_layer_units,  # number of units in hidden layer
-                                hidden3_num_units=self.config.hid_layer_units,  # number of units in hidden layer
-                                
-                                output_num_units=self.config._no_classes,
-                                output_nonlinearity=lasagne.nonlinearities.softmax,
-                                
-                                eval_size=0.01,
-                                
-                                on_epoch_finished=[AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.0001),
-                                                    AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
-                                                    EarlyStopping(patience=self.config.early_stopping_patience),],
-                                #batch_iterator_test=MyBatchIterator(128,forced_even=True),
-                                #batch_iterator_train=MyBatchIterator(128,forced_even=True),
-
-                                # optimization method:
-                                update=nesterov_momentum,
-                                
-                                update_learning_rate=theano.shared(float32(self.config.learn_rates)),
-                                update_momentum=theano.shared(float32(self.config.momentum)),
-                                
-                                #update_learning_rate=self.config.learn_rates,
-                                #update_momentum=momentum,
-                                
-                                regression=False,  # flag to indicate we're dealing with regression problem
-                                max_epochs=self.config.epochs,  # we want to train this many epochs
-                                verbose=1,
-                                )  
+                
+                clf = self.stdDnn((None, X_train.shape[1]))
 
             print 'fitting classifier...',deep_learner
             clf.fit(X_train, y_train)
@@ -554,6 +467,15 @@ class MyModel:
             print 'done!'
 
             confidence_clf = None
+
+            if self.config.mergeBaseline:
+                X_train,y_train = self.clf_embedding(all_ids,y_all,(std_scale,pca,transform_clf),clf,window_size, step_size, stride)
+                print 'Embedded X_train shape:',X_train
+                merged_clf = self.stdDnn((None, X_train.shape[1])) 
+                #shuffle training vectors (inplace) for minibatch gradient descent optimisers
+                unspeech_utils.shuffle_in_unison(X_train,y_train)
+                merged_clf.fit(X_train, y_train)
+
             if self.config.use_linear_confidence:
                 #trains a linear regression model predicting confidence of
                 y_train_clf_proba = clf.predict_proba(X_train)
@@ -577,6 +499,9 @@ class MyModel:
 
         #print 'len ids:', len(all_ids), 'classes:', len(classes)
 
+        if self.config.computeBaseline:
+            self.trainBaseline(all_ids,classes)
+
         for i in xrange(no_classifiers):
             if self.config.deep_learner:
                 print 'Train #',i,' dbn classifier with window_size:',self.config.window_sizes[i],'step_size=',self.config.step_sizes[i]
@@ -584,9 +509,6 @@ class MyModel:
                 self._dbns.append(clf)
                 self._transforms.append(transforms)
                 self._confidences.append(confidence_clf)
-        if self.config.computeBaseline:
-            self.trainBaseline(all_ids,classes)
-    
 
     #fuse frame probabiltites, defaults to geometric mean
     def fuse_op(self,frame_proba, op=scipy.stats.gmean, normalize=True):
@@ -609,7 +531,7 @@ class MyModel:
             return fused_proba
 
     def inspect_predict(self,utterance_id):
-        clf,std_scale,pca,window_size,step_size,stride = self._dbns[0],self._scalers[0],self._pcas[0],self.config.window_sizes[0],self.config.step_sizes[0],self.config.strides[0]
+        clf,window_size,step_size,stride = self._dbns[0],self.config.window_sizes[0],self.config.step_sizes[0],self.config.strides[0]
         
         logspec_features = np.load(utterance_id+'.logspec.npy')
         
@@ -620,12 +542,11 @@ class MyModel:
 
         subplot(412)
         imshow(utterance.T, aspect='auto', interpolation='nearest')
-        
-        utterance = std_scale.transform(utterance)
-        if self.use_pca or self.use_lda:
-            print 'Using dimension reduction transform'
-            utterance = pca.transform(utterance)
-
+       
+        for transform in self._transforms:
+            if transform != None:
+                utterance = transform.transform(utterance)
+         
         subplot(413)
         imshow(utterance.T, aspect='auto', interpolation='nearest')
 
@@ -662,6 +583,36 @@ class MyModel:
     #
     #    return self.baseline_clf.predict(X_test) 
 
+    #use the transform function on the base classifier as base embedding (for dnn and cnn the last layer representation)
+    def clf_embedding(self,utt_ids, utt_y, transforms, clf,window_size, step_size, stride):
+        print 'Building classifier embedding...'
+        baseline_X = self.baseline_embedding(utt_ids)
+        X_train,X2_train,y_train = loadTrainData(utt_ids, utt_y, window_size, step_size, stride, baseline_X)
+        
+        for transform in transforms:
+            if transform != None:
+                utterances = transform.transform(X_train)
+
+        if(utterances.dtype != 'float32'):
+            #print 'Warning, training data was not float32: ', utterance.dtype
+            utterances = utterances.astype('float32', copy=False)
+
+        #2D reshape for cnn
+        if self.config.deep_learner=='cnn':
+            utterances = utterances.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
+        return np.hstack(clf.transform(utterances),X2_train),y_train
+
+    def baseline_embedding(self, utt_ids):
+        print 'Building baselinge embedding...'
+        X = loadBaselineData(utt_ids)
+
+        for scaler in self.baseline_transforms:
+            scaler.transform(X)
+
+        X = X.astype(np.float32)
+
+        return self.baseline_clf.transform(X)
+
     #predict a whole
     def predict_utterance(self,utterance_id):
         if not self._dbns:
@@ -691,7 +642,7 @@ class MyModel:
 
             #todo remove non-sensical votes
             #local_vote = self.fuse_op(frame_proba,op=scipy.stats.hmean)
-            local_vote1 = self.fuse_op(frame_proba,op=scipy.stats.gmean)
+            #local_vote1 = self.fuse_op(frame_proba,op=scipy.stats.gmean)
             local_vote2 = self.fuse_op(frame_proba,op=majority_vote)
 
             if confidence_clf:
@@ -707,14 +658,23 @@ class MyModel:
                 local_vote4 = self.fuse_op(frame_proba,op=np.multiply.reduce)
 
             #local_vote5 = self.fuse_op(frame_proba,op=np.maximum.reduce)
-            local_vote6 = self.fuse_op(frame_proba_log,op=np.add.reduce)
+
+            if confidence_clf and self.baseline_clf!=None:
+                frame_proba_baseline = self.baselinePredictProba([utterance_id])[0]
+                local_vote6 = self.fuse_op(frame_proba+frame_proba_baseline,op=functools.partial(weighted_majority_vote,weights=weights))
+            else:
+                local_vote6 = self.fuse_op(frame_proba_log,op=np.add.reduce)
+
             #local_vote3 = self.fuse_op(frame_proba,op=np.multiply.reduce)
             #local_vote4 = self.fuse_op(frame_proba,op=np.maximum.reduce)
 
-            voting += [local_vote1,local_vote2,local_vote3,local_vote6]
-            multi_pred += [np.argmax(local_vote1),np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote6)]
+            voting += [local_vote2,local_vote3,local_vote4,local_vote6]
+            multi_pred += [np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote4),np.argmax(local_vote6)]
             #multi_pred_names = ['hmean','gmean','majority_vote','add.reduce','multiply.reduce','maximum.reduce','log add.reduce']
-            multi_pred_names = ['gmean','majority_vote','weighted majority add' if confidence_clf else 'add','weighted majority vote' if confidence_clf else 'mul','log add.reduce']
+            multi_pred_names = ['majority_vote',
+                    'weighted majority add' if confidence_clf else 'add',
+                    'weighted majority vote' if confidence_clf else 'mul',
+                    'log add.reduce/or baseline merge if avail']
 
         #print voting
 
@@ -722,6 +682,27 @@ class MyModel:
         pred = np.argmax(np.add.reduce(voting))
         return pred,multi_pred,multi_pred_names
    
+
+    def baselinePredictProba(self,dev_ids):
+        X = loadBaselineData(dev_ids)
+
+        for scaler in self.baseline_transforms:
+            scaler.transform(X)
+
+        X = X.astype(np.float32)
+
+        return self.baseline_clf.predict_proba(X)
+
+    def baselinePredict(self,dev_ids):
+        X = loadBaselineData(dev_ids)
+
+        for scaler in self.baseline_transforms:
+            scaler.transform(X)
+
+        X = X.astype(np.float32)
+
+        return self.baseline_clf.predict(X)
+
     def performance_on_set(self,dev_ids,dev_classes,class2num):
         #aggregated predictions by geometric mean
         y_pred = []
@@ -737,21 +718,14 @@ class MyModel:
 
         if self.baseline_clf:
 
-            X = loadBaselineData(dev_ids)
+            y_pred_baseline =self.baselinePredict(dev_ids)
 
-            for scaler in self.baseline_transforms:
-                scaler.transform(X)
-
-            X = X.astype(np.float32)
-
-            y_pred_baseline = self.baseline_clf.predict(X)
             return_recall_score = recall_score(dev_classes, y_pred_baseline, average='macro', pos_label=None)
             print 'Baseline: '
             print_classificationreport(dev_classes, y_pred_baseline)
             print 'Baseline 2-class: '
             print_classificationreport(dev_classes_2class, (np.array(y_pred_baseline)!=0).astype(np.int32))
         
-
         if self._dbns:
             multi_pred_names = []
 
@@ -806,15 +780,16 @@ def load_set(classes,name,max_samples,class2num,withSpeakerInfo=False):
     for myclass in classes:
         print myclass,name
         if withSpeakerInfo:
-            ids,speakers = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir,withSpeakerInfo=True)
+            ids,speakers = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir,withSpeakerInfo=withSpeakerInfo)
         else:
             ids = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir)
         if max_samples != -1:
             ids = ids[:max_samples]
             if withSpeakerInfo:
                 speakers = speakers[:max_samples]
-        
-        for myid,speaker in zip(ids,speakers):
+       
+        #set all speakers to the same speakers if speaker info os not available
+        for myid,speaker in zip(ids,speakers if withSpeakerInfo else ['0']*len(ids)):
             list_ids.append(myid)
             list_classes.append(class2num[myclass])
             list_speakers.append(speaker)
@@ -861,6 +836,9 @@ if __name__ == '__main__':
     parser.add_argument('--with-sparsefiltering', dest='use_sparse', help='Use sparse filtering features', action='store_true', default=False)
     parser.add_argument('--pca', dest='use_pca', help='pca reduction of feature space', action='store_true', default=False)
     parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
+    parser.add_argument('--merge-baseline', dest='merge_baseline', help='merge with baseline features (only with dnn baseline)', action='store_true', default=False)
+    parser.add_argument('--preload-weights-from', dest='weights_file', help='Preload weights file', type=str, default='')
+
     args = parser.parse_args()
 
     window_sizes = [int(x) for x in args.window_size.split(',')]
@@ -876,7 +854,7 @@ if __name__ == '__main__':
     no_classes = len(dataset_classes)
     print 'classes:',dataset_classes
 
-    all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, True)
+    all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, args.test_speakers != '')
   
     print 'classes:',set(classes)
     print 'first view data elements:',zip(all_ids, classes, speakers)[:10]
@@ -894,7 +872,7 @@ if __name__ == '__main__':
         print 'Train classes:',set(train_classes),'dev classes:',set(dev_classes)
     else:
         train_ids, train_classes, train_speakers = all_ids, classes, speakers
-        dev_ids, dev_classes, dev_speakers = load_set(dataset_classes,'dev',args.max_samples,class2num, True)
+        dev_ids, dev_classes, dev_speakers = load_set(dataset_classes,'dev',args.max_samples,class2num, False)
 
     args_dropouts = [float(x) for x in args.dropouts.split(',')]
 
@@ -921,12 +899,18 @@ if __name__ == '__main__':
                         iterations=1,
                         computeBaseline=(args.baseline != ''),
                         baselineClassifier = args.baseline,
-                        use_linear_confidence = args.use_linear_confidence) 
+                        mergeBaseline = args.merge_baseline,
+                        use_linear_confidence = args.use_linear_confidence,
+                        weightsFile = args.weights_file) 
 
     model = MyModel(config)
     model.fit(train_ids,train_classes)
     model.performance_on_set(dev_ids,dev_classes,class2num)
 
     if (args.modelfilename != ''):
+        if args.deep_learner == 'cnn' or args.deep_learner == 'dnn':
+            print 'saving network weights'
+            model._dbns[0].save_weights_to(args.modelfilename+'.weights.npy')
+        
         print 'serialzing model...'
         serialize(model,args.modelfilename)
