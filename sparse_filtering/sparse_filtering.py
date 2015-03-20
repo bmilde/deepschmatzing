@@ -56,7 +56,8 @@ class SparseFiltering(BaseEstimator):
     and is based on the Matlab code provided in the supplementary material
     """
 
-    def __init__(self, n_features, maxfun=500, iprint=-1, stack_orig=False):
+    def __init__(self, n_features, maxfun=100, iprint=-1, stack_orig=False):
+        print 'SparseFilters Init maxfun:',maxfun
         self.n_features = n_features
         self.iprint = iprint
         self.maxfun = maxfun

@@ -1,7 +1,10 @@
 ### some non-merged features of lasagne
 
 from lasagne.init import Initializer
+import itertools
 
+import numpy as np
+import matplotlib.pyplot as pyplot
 
 class ReluNormal(Initializer):
     """
@@ -23,3 +26,18 @@ class ReluNormal(Initializer):
         n_l = input_channels*receptive_field_size
         std = np.sqrt(2.0/(n_l))
         return floatX(np.random.normal(0, std, size=shape))
+
+#shows the train history of a neural net
+def plotTrainHistories(nets,names):
+    for net,name in itertools.izip(nets,names):
+        train_loss = np.array([i['train_loss'] for i in net.train_history_])
+        valid_loss = np.array([i['valid_loss'] for i in net.train_history_])
+        pyplot.plot(train_loss, linewidth=3, label=name+' train')
+        pyplot.plot(valid_loss, linewidth=3, label=name+' valid')
+    pyplot.grid()
+    pyplot.legend()
+    pyplot.xlabel('epoch')
+    pyplot.ylabel('loss')
+    pyplot.ylim(1, 2)
+    pyplot.yscale('log')
+    pyplot.show()
