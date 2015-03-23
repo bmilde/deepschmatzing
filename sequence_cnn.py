@@ -1019,7 +1019,7 @@ if __name__ == '__main__':
         class2num[myclass] = i
 
     #do not overwrite existing files
-    while(os.path.isfile(args.modelfilename+'.pickle')):
+    while(os.path.isfile(args.modelfilename+'.pickle') or os.path.isfile(args.modelfilename+'_0.pickle')):
         print 'Warning',args.modelfilename+'.pickle','exists.'
         args.modelfilename += '.new'
         print 'Choosen:',args.modelfilename,'as new filename!'
@@ -1037,7 +1037,7 @@ if __name__ == '__main__':
             print 'CV Fold: ', fold, 'test speakers:',args.test_speakers
             
             if modelfilename != '':
-                args.modelfilename += ('_'+str(fold))
+                args.modelfilename = modelfilename + ('_'+str(fold))
             
             model = createModel(args, dataset_classes, class2num)
             models.append(model)
