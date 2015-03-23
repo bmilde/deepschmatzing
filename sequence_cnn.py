@@ -831,7 +831,7 @@ def load_set(classes,name,max_samples,class2num,withSpeakerInfo=False):
     list_speakers = []
 
     for myclass in classes:
-        print myclass,name
+        #print myclass,name
         if withSpeakerInfo:
             ids,speakers = unspeech_utils.loadIdFile(args.filelists+name+'_'+myclass+'.txt',basedir=args.basedir,withSpeakerInfo=withSpeakerInfo)
         else:
@@ -882,7 +882,7 @@ def createModel(args,dataset_classes,class2num):
     all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, args.test_speakers != '')
   
     print 'classes:',set(classes)
-    print 'first view data elements:',zip(all_ids, classes, speakers)[:10]
+    #print 'first view data elements:',zip(all_ids, classes, speakers)[:10]
 
     #print len(all_ids),len(classes),len(speakers)
 
@@ -1030,7 +1030,7 @@ if __name__ == '__main__':
         all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, True)
         speakers = list(set(speakers))
         
-        kf = KFold(len(speakers), n_folds=2)
+        kf = KFold(len(speakers), n_folds=5)
 
         for fold,(train_sel, dev_sel) in enumerate(kf):
             args.test_speakers = ','.join([elem for i,elem in enumerate(speakers) if i in dev_sel])
