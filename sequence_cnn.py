@@ -1,4 +1,5 @@
 import sys
+from collections import defaultdict
 import argparse
 import numpy as np
 import theano
@@ -164,6 +165,7 @@ class ModelConfig:
         
         #feature generation and class config
         self.window_sizes = window_sizes
+        self.no_classifiers = len(window_sizes)
         self.step_sizes = step_sizes
         self.strides = strides
         self.pca_components = pca_components
@@ -553,9 +555,14 @@ class MyModel:
                 self.config._no_classes += 1
 
         #hack to free now unneeded memory
-        X_train.resize((0,0),refcheck=False)
-        y_train.resize((0,0),refcheck=False)
-        X_energy.resize((0,0),refcheck=False)
+
+        #X_train.resize((0,0),refcheck=False)
+        #y_train.resize((0,0),refcheck=False)
+        #X_energy.resize((0,0),refcheck=False)
+        
+        del X_train
+        del y_train
+        del X_energy
         gc.collect()
 
         return (std_scale,pca,transform_clf),clf,confidence_clf
@@ -568,7 +575,7 @@ class MyModel:
         if self.config.computeBaseline:
             self.trainBaseline(all_ids,classes)
 
-        for i in xrange(no_classifiers):
+        for i in xrange(self.config.no_classifiers):
             if self.config.deep_learner:
                 print 'Train #',i,' dbn classifier with window_size:',self.config.window_sizes[i],'step_size=',self.config.step_sizes[i]
                 transforms,clf,confidence_clf = self.trainClassifier(all_ids,classes,self.config.window_sizes[i],self.config.step_sizes[i],self.config.strides[i],self.config.deep_learner)
@@ -712,9 +719,9 @@ class MyModel:
             multi_pred += [np.argmax(local_vote2),np.argmax(local_vote3),np.argmax(local_vote4),np.argmax(local_vote6)]
             #multi_pred_names = ['hmean','gmean','majority_vote','add.reduce','multiply.reduce','maximum.reduce','log add.reduce']
             multi_pred_names = ['majority_vote',
-                    'weighted majority add' if confidence_clf else 'add',
-                    'weighted majority vote' if confidence_clf else 'mul',
-                    'log add.reduce/or baseline merge if avail']
+                    'weighted_majority_add' if confidence_clf else 'add',
+                    'weighted_majority_vote' if confidence_clf else 'mul',
+                    'baseline_merge']
 
         #print voting
 
@@ -772,7 +779,7 @@ class MyModel:
             #now test on heldout ids (dev set)
             for myid in dev_ids:
                 #print 'testing',myid
-                pred,multi_pred,multi_pred_names = model.predict_utterance(myid)
+                pred,multi_pred,multi_pred_names = self.predict_utterance(myid)
                 y_multi_pred.append(multi_pred)
                 y_pred.append(pred)
 
@@ -934,22 +941,43 @@ def createModel(args,dataset_classes,class2num):
         
         print 'serialzing model...'
 
-        #do not overwrite existing files
-        while(os.path.isfile(args.modelfilename)):
-            print 'Warning',args.modelfilename,'exists.'
-            args.modelfilename += '.new.pickle'
-            print 'Choosen:',args.modelfilename,'as new filename!'
-        
         if args.deep_learner == 'cnn' or args.deep_learner == 'dnn':
             print 'saving network weights'
             model._dbns[0].save_weights_to(args.modelfilename+'.weights.npy')
        
         print 'saving model...'
-        serialize(model,args.modelfilename)
+        serialize(model,args.modelfilename+'.pickle')
         print 'extra copy for results'
         serialize(model.results,args.modelfilename+'.results.pickle')
     return model
 
+def crossvalidated_result_report(results):
+    assert(len(results) >= 1)
+
+    outputstr = ''
+    outputstr += '*'*50 + '\n'
+    combined_uar = defaultdict(list)
+    combined_confusion = {}
+
+    for result in results:
+        for key in result.keys():
+            if key not in combined_confusion:
+                combined_confusion[key] = result[key]['confusion']
+            else:
+                combined_confusion[key] += result[key]['confusion']
+            combined_uar[key] += [result[key]['uar']]
+    
+    for key in results[0].keys():
+        outputstr += '+'*50 + '\n' +  ' '*50 + '\n'
+        outputstr += 'CV for: ' + str(key) + '\n'
+        outputstr += str(combined_confusion[key]) + '\n\n'
+        uar = np.asarray(combined_uar[key])
+        outputstr += 'Mean: ' + str(np.mean(uar)) + '\n'
+        outputstr += 'Individual: ' +  str(uar) + '\n'
+        outputstr += 'Max+: ' + str(np.amax(uar)-np.mean(uar)) + '\n'
+        outputstr += 'Max-: ' + str(np.mean(uar)-np.amin(uar)) + '\n'
+    print outputstr
+    return outputstr
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calculate FBANK features (=logarithmic mel frequency filter banks) for all supplied files in file list (txt).')
@@ -990,18 +1018,34 @@ if __name__ == '__main__':
     for i,myclass in enumerate(dataset_classes):
         class2num[myclass] = i
 
+    #do not overwrite existing files
+    while(os.path.isfile(args.modelfilename+'.pickle')):
+        print 'Warning',args.modelfilename+'.pickle','exists.'
+        args.modelfilename += '.new'
+        print 'Choosen:',args.modelfilename,'as new filename!'
+    
     if args.crossvalidation:
+        modelfilename = args.modelfilename
+
         all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, True)
         speakers = list(set(speakers))
         
-        kf = KFold(len(speakers), n_folds=5)
+        kf = KFold(len(speakers), n_folds=2)
 
         for fold,(train_sel, dev_sel) in enumerate(kf):
-            #print fold
-            #print("%s %s" % (train_sel, dev_sel))
             args.test_speakers = ','.join([elem for i,elem in enumerate(speakers) if i in dev_sel])
             print 'CV Fold: ', fold, 'test speakers:',args.test_speakers
+            
+            if modelfilename != '':
+                args.modelfilename += ('_'+str(fold))
+            
             model = createModel(args, dataset_classes, class2num)
             models.append(model)
+
+        results = [model.results for model in models]
+
+        txt_report = crossvalidated_result_report(results)
+        with open(args.modelfilename+'.cvresults.txt','w') as report_out:
+            report_out.write(txt_report)
     else:    
         createModel(args, dataset_classes, class2num)
