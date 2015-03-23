@@ -5,6 +5,8 @@ import theano
 import lasagne
 from lasagne_addon import *
 
+from linear_confidence_model import *
+
 import functools
 
 #higher recrusion limit for large models
@@ -14,6 +16,7 @@ from lasagne import layers
 from lasagne import init
 
 from sklearn import svm
+from sklearn.cross_validation import KFold
 
 from lasagne.updates import *
 from nolearn.lasagne import NeuralNet,BatchIterator
@@ -24,7 +27,7 @@ from nolearn_addon import *
 #from lasagne.layers.cuda_convnet import Conv2DCCLayer as Conv2DLayer
 #from lasagne.layers.cuda_convnet import MaxPool2DCCLayer as MaxPool2DLayer
 
-
+import gc
 
 #except ImportError:
 
@@ -65,6 +68,7 @@ from scipy.stats import itemfreq
 #pickle currently buggy with nolearn, using dill as replacement
 #import cPickle as pickle
 import dill as pickle
+import os.path
 
 def float32(k):
     return np.cast['float32'](k)
@@ -208,7 +212,9 @@ class MyModel:
         self.baseline_clf = None
         self.baseline_transforms = []
         self.config = config
-    
+        self.results = {}
+
+    #trains a baseline classifier on the baseline feature set
     def trainBaseline(self,ids,classes):
         def getTreeClf():
             return RandomForestClassifier(n_estimators=self.config.hid_layer_units_baseline, n_jobs=-1, random_state=42, oob_score=True, verbose=1)
@@ -470,13 +476,13 @@ class MyModel:
                     eval_size=0.01,
 
                     on_epoch_finished=[
-                        AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.001),
-                        AdjustVariable('update_momentum', start=self.config.momentum, stop=0.99),
+                        AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.0001),
+                        AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
                         EarlyStopping(patience=self.config.early_stopping_patience),
                     ],
 
-                    batch_iterator_train=ShufflingBatchIteratorMixin(batch_size=128),
-                    batch_iterator_test=BatchIterator(batch_size=128),
+                    batch_iterator_train=ShufflingBatchIteratorMixin(batch_size=512),
+                    batch_iterator_test=BatchIterator(batch_size=512),
                     
                     #update=rmsprop,
                     #update_learning_rate=1.0,
@@ -532,19 +538,25 @@ class MyModel:
                 y_train_clf = np.argmax(y_train_clf_proba, axis=1) 
                 mask = np.equal(y_train, y_train_clf)
                 print 'shapes (energy/train):',X_energy.shape,y_train_clf_proba.shape
-                y_train_clf_proba = np.hstack([y_train_clf_proba,X_energy])
+                #y_train_clf_proba = np.hstack([y_train_clf_proba,X_energy])
                 print 'new shape:',y_train_clf_proba.shape
                 confidence_y = mask.astype(np.float32)
                 print 'confidence value distribution:',np.bincount(confidence_y.astype(np.int32))
-                confidence_clf = linear_model.ElasticNet(normalize=True) #linear_model.Ridge(alpha = .5)
-                confidence_clf.fit(y_train_clf_proba,confidence_y)
+                confidence_clf = LinearConfidenceModel(num_classproba=self.config._no_classes) #linear_model.ElasticNet(normalize=True) #linear_model.Ridge(alpha = .5)
+                confidence_clf.fit([y_train_clf_proba,X_energy],confidence_y)
             
             if iteration < self.config.iterations-1:
                 #restrict samples to the ones that the classifier can correctly distinguish
                 y_train_clf = clf.predict(X_train)
                 mask = np.equal(y_train, y_train_clf)
-                y_train[mask] = self._no_langs
-                self._no_classes += 1
+                y_train[mask] = self.config._no_langs
+                self.config._no_classes += 1
+
+        #hack to free now unneeded memory
+        X_train.resize((0,0),refcheck=False)
+        y_train.resize((0,0),refcheck=False)
+        X_energy.resize((0,0),refcheck=False)
+        gc.collect()
 
         return (std_scale,pca,transform_clf),clf,confidence_clf
 
@@ -671,13 +683,10 @@ class MyModel:
             frame_proba_log = np.log(frame_proba)
             frame_proba_with_energy = np.hstack([frame_proba,X_energy])
 
-            #todo remove non-sensical votes
-            #local_vote = self.fuse_op(frame_proba,op=scipy.stats.hmean)
-            #local_vote1 = self.fuse_op(frame_proba,op=scipy.stats.gmean)
             local_vote2 = self.fuse_op(frame_proba,op=majority_vote)
 
             if confidence_clf:
-                weights = confidence_clf.predict(frame_proba_with_energy)
+                weights = confidence_clf.predict([frame_proba,X_energy])
                 frame_proba_weighted = frame_proba * np.array([weights]).T
                 local_vote3 = self.fuse_op(frame_proba_weighted,op=np.add.reduce)
             else:
@@ -753,9 +762,9 @@ class MyModel:
 
             return_recall_score = recall_score(dev_classes, y_pred_baseline, average='macro', pos_label=None)
             print 'Baseline: '
-            print_classificationreport(dev_classes, y_pred_baseline)
+            self.results['baseline'] = print_classificationreport(dev_classes, y_pred_baseline)
             print 'Baseline 2-class: '
-            print_classificationreport(dev_classes_2class, (np.array(y_pred_baseline)!=0).astype(np.int32))
+            self.results['baseline_2c'] = print_classificationreport(dev_classes_2class, (np.array(y_pred_baseline)!=0).astype(np.int32))
         
         if len(self._dbns) > 0:
             multi_pred_names = []
@@ -774,10 +783,10 @@ class MyModel:
                 #print 'Window size', window_sizes[i],'step size',step_sizes[i]
                 prediction = [pred[i] for pred in y_multi_pred]
                 prediction_2class = (np.array(prediction)!=0).astype(np.int32)
-                print_classificationreport(dev_classes, prediction)
+                self.results[multi_pred_names[i]] = print_classificationreport(dev_classes, prediction)
                 print '+'*50
                 print 'Pred #',i,multi_pred_names[i],' 2-class :'
-                print_classificationreport(dev_classes_2class, prediction_2class)
+                self.results[multi_pred_names[i]+'_2c'] = print_classificationreport(dev_classes_2class, prediction_2class)
                 print '*'*50
                 print ' '*50
             print '*'*50
@@ -785,20 +794,26 @@ class MyModel:
             print ' '*50
             print class2num
             print 'Fused scores:'
-            print_classificationreport(dev_classes, y_pred)
+            self.results['fused'] = print_classificationreport(dev_classes, y_pred)
             print 'Fused scores 2-class:'
-            print_classificationreport(dev_classes_2class, (np.array(y_pred)!=0).astype(np.int32))
+            self.results['fused_2c'] = print_classificationreport(dev_classes_2class, (np.array(y_pred)!=0).astype(np.int32))
 
             return_recall_score = recall_score(dev_classes, y_pred, average='macro', pos_label=None)
         return return_recall_score
         
 '''generic classification report for real_classes vs. predicted_classes'''
 def print_classificationreport(real_classes, predicted_classes):
-    print 'Unweighted accuracy:', accuracy_score(real_classes, predicted_classes)
-    print 'Unweighted recall:', recall_score(real_classes, predicted_classes, average='macro', pos_label=None)
+    uaa= accuracy_score(real_classes, predicted_classes)
+    uar= recall_score(real_classes, predicted_classes, average='macro', pos_label=None)
+    report = classification_report(real_classes, predicted_classes)
+    confusion = confusion_matrix(real_classes, predicted_classes)
+
+    print 'Unweighted accuracy:', uaa
+    print 'Unweighted recall:', uar 
     print 'Classification report:'
-    print classification_report(real_classes, predicted_classes)
-    print 'Confusion matrix:\n%s' % confusion_matrix(real_classes, predicted_classes)
+    print report
+    print 'Confusion matrix:\n%s' % confusion
+    return {'uaa':uaa,'uar':uar,'report':report,'confusion':confusion}
 
 '''return the given set, with classes and name (usually train, dev, or test), as tuple of ids (list) and matching classes (list)'''
 def load_set(classes,name,max_samples,class2num,withSpeakerInfo=False):
@@ -842,47 +857,17 @@ def train_dev_split(all_ids, classes, speakers, dev_speaker_sel):
             train_speakers += [speaker]
     return train_ids, train_classes, train_speakers, dev_ids, dev_classes, dev_speakers
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Calculate FBANK features (=logarithmic mel frequency filter banks) for all supplied files in file list (txt).')
-    parser.add_argument('-f', '--filelists-dir', dest="filelists", help='file list basedir', default='corpus/voxforge/', type=str)
-    parser.add_argument('-v', dest='verbose', help='verbose output', action='store_true', default=False)
-    parser.add_argument('-c', '--classes', dest='classes', help='comma seperated list of classes',type=str,default='de,fr')
-    parser.add_argument('-m', '--max-samples', dest='max_samples', help='max utterance samples per language',type=int,default=-1)
-    parser.add_argument('-bdir', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
-    parser.add_argument('-b', '--baseline',dest='baseline', help='compute baseline with this classifier (svm,randomforest,dnn)', default = 'svm', type=str)
-    parser.add_argument('-bonly', '--baseline-only',dest='baseline_only', help='compute only baseline, specify classifier with -b', action='store_true', default = False)
-    parser.add_argument('-lc','--use_linear_confidence',dest='use_linear_confidence',help='use linear confidence', action='store_true', default = False)
-    parser.add_argument('-e', '--max-epochs',dest='max_epochs', help='maximum number of supervised finetuning epochs', default = 1000, type=int)
-    parser.add_argument('-s', '--save-model',dest='modelfilename', help='store trained model to this filename, if specified', default = '', type=str)
-    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in cnn', default = '0.1,0.2,0.3,0.5', type=str)
-    parser.add_argument('-hu', '--hidden-layer-units',dest='hiddenlayerunits', help='number of fully dense hidden layer units', default = 512, type=int)
-    parser.add_argument('-bhu', '--hidden-layer-units-baseline',dest='hiddenlayerunits_baseline', help='number of fully dense hidden layer units for baseline (default to same as -hu if set to zero)', default = 0, type=int)
-    parser.add_argument('-r', '--learnrate',dest='learnrate', help='learning rate', default = 0.01, type=float)
-    parser.add_argument('-mo', '--momentum',dest='momentum', help='momentum', default = 0.9, type=float)
-    parser.add_argument('-l', '--deep-learner',dest='deep_learner', help='learning rate', default = 'nolearn', type=str)
-    parser.add_argument('-g', '--gpu-id',dest='gpu_id', help='GPU board to use (defaults to 0)', default = 0, type=int)
-    parser.add_argument('-p', '--early-stopping-patience',dest='early_stopping_patience', help='wait this many epochs for a better result, otherwise stop training', default = 100, type=int)
-    parser.add_argument('-cv', '--loso-cv', dest='loso_cv' , help='no development set, create training/test splits for leave-one-speaker-out cross-validation (LOSO-CV) on the training set. Requires speaker information.', action='store_true', default=False)
-    parser.add_argument('-t', '--test-speakers',dest='test_speakers', help='list of test speakers instead of a development or test set', default='',type=str)
-    parser.add_argument('-w', '--window-size',dest='window_size', help='single window size or list of window sizes', default='11',type=str)
-    parser.add_argument('--with-sparsefiltering', dest='use_sparse', help='Use sparse filtering features', action='store_true', default=False)
-    parser.add_argument('--pca', dest='use_pca', help='pca reduction of feature space', action='store_true', default=False)
-    parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
-    parser.add_argument('--merge-baseline', dest='merge_baseline', help='merge with baseline features (only with dnn baseline)', action='store_true', default=False)
-    parser.add_argument('--preload-weights-from', dest='weights_file', help='Preload weights file', type=str, default='')
-    parser.add_argument('--load-model-from', dest='load_model', help='Load model from this file, evaluate performance only', type=str, default='')
 
-    args = parser.parse_args()
-
+def createModel(args,dataset_classes,class2num):
     window_sizes = [int(x) for x in args.window_size.split(',')]
     no_classifiers = len(window_sizes)
     step_sizes = [2] 
     strides = [1]
 
-    dataset_classes = (args.classes).split(',')
-    class2num = {}
-    for i,myclass in enumerate(dataset_classes):
-        class2num[myclass] = i
+    #dataset_classes = (args.classes).split(',')
+    #class2num = {}
+    #for i,myclass in enumerate(dataset_classes):
+    #    class2num[myclass] = i
     
     no_classes = len(dataset_classes)
     print 'classes:',dataset_classes
@@ -946,9 +931,77 @@ if __name__ == '__main__':
     model.performance_on_set(dev_ids,dev_classes,class2num)
 
     if (args.modelfilename != ''):
+        
+        print 'serialzing model...'
+
+        #do not overwrite existing files
+        while(os.path.isfile(args.modelfilename)):
+            print 'Warning',args.modelfilename,'exists.'
+            args.modelfilename += '.new.pickle'
+            print 'Choosen:',args.modelfilename,'as new filename!'
+        
         if args.deep_learner == 'cnn' or args.deep_learner == 'dnn':
             print 'saving network weights'
             model._dbns[0].save_weights_to(args.modelfilename+'.weights.npy')
-        
-        print 'serialzing model...'
+       
+        print 'saving model...'
         serialize(model,args.modelfilename)
+        print 'extra copy for results'
+        serialize(model.results,args.modelfilename+'.results.pickle')
+    return model
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Calculate FBANK features (=logarithmic mel frequency filter banks) for all supplied files in file list (txt).')
+    parser.add_argument('-f', '--filelists-dir', dest="filelists", help='file list basedir', default='corpus/voxforge/', type=str)
+    parser.add_argument('-v', dest='verbose', help='verbose output', action='store_true', default=False)
+    parser.add_argument('-c', '--classes', dest='classes', help='comma seperated list of classes',type=str,default='de,fr')
+    parser.add_argument('-m', '--max-samples', dest='max_samples', help='max utterance samples per language',type=int,default=-1)
+    parser.add_argument('-bdir', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
+    parser.add_argument('-b', '--baseline',dest='baseline', help='compute baseline with this classifier (svm,randomforest,dnn)', default = 'svm', type=str)
+    parser.add_argument('-bonly', '--baseline-only',dest='baseline_only', help='compute only baseline, specify classifier with -b', action='store_true', default = False)
+    parser.add_argument('-lc','--use_linear_confidence',dest='use_linear_confidence',help='use linear confidence', action='store_true', default = False)
+    parser.add_argument('-e', '--max-epochs',dest='max_epochs', help='maximum number of supervised finetuning epochs', default = 1000, type=int)
+    parser.add_argument('-s', '--save-model',dest='modelfilename', help='store trained model to this filename, if specified', default = '', type=str)
+    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in cnn', default = '0.1,0.2,0.3,0.5', type=str)
+    parser.add_argument('-hu', '--hidden-layer-units',dest='hiddenlayerunits', help='number of fully dense hidden layer units', default = 512, type=int)
+    parser.add_argument('-bhu', '--hidden-layer-units-baseline',dest='hiddenlayerunits_baseline', help='number of fully dense hidden layer units for baseline (default to same as -hu if set to zero)', default = 0, type=int)
+    parser.add_argument('-r', '--learnrate',dest='learnrate', help='learning rate', default = 0.01, type=float)
+    parser.add_argument('-mo', '--momentum',dest='momentum', help='momentum', default = 0.9, type=float)
+    parser.add_argument('-l', '--deep-learner',dest='deep_learner', help='learning rate', default = 'nolearn', type=str)
+    parser.add_argument('-g', '--gpu-id',dest='gpu_id', help='GPU board to use (defaults to 0)', default = 0, type=int)
+    parser.add_argument('-p', '--early-stopping-patience',dest='early_stopping_patience', help='wait this many epochs for a better result, otherwise stop training', default = 100, type=int)
+    parser.add_argument('-cv', '--cross-validation', dest='crossvalidation' , help='5x cross-validated run, takes precedence over test speakers. Requires speaker information.', action='store_true', default=False)
+    parser.add_argument('-t', '--test-speakers',dest='test_speakers', help='list of test speakers instead of a development or test set', default='',type=str)
+    parser.add_argument('-w', '--window-size',dest='window_size', help='single window size or list of window sizes', default='11',type=str)
+    parser.add_argument('--with-sparsefiltering', dest='use_sparse', help='Use sparse filtering features', action='store_true', default=False)
+    parser.add_argument('--pca', dest='use_pca', help='pca reduction of feature space', action='store_true', default=False)
+    parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
+    parser.add_argument('--merge-baseline', dest='merge_baseline', help='merge with baseline features (only with dnn baseline)', action='store_true', default=False)
+    parser.add_argument('--preload-weights-from', dest='weights_file', help='Preload weights file', type=str, default='')
+    parser.add_argument('--load-model-from', dest='load_model', help='Load model from this file, evaluate performance only', type=str, default='')
+
+    args = parser.parse_args()
+
+    models = []
+
+    dataset_classes = (args.classes).split(',')
+    class2num = {}
+    for i,myclass in enumerate(dataset_classes):
+        class2num[myclass] = i
+
+    if args.crossvalidation:
+        all_ids, classes, speakers = load_set(dataset_classes,'train',args.max_samples,class2num, True)
+        speakers = list(set(speakers))
+        
+        kf = KFold(len(speakers), n_folds=5)
+
+        for fold,(train_sel, dev_sel) in enumerate(kf):
+            #print fold
+            #print("%s %s" % (train_sel, dev_sel))
+            args.test_speakers = ','.join([elem for i,elem in enumerate(speakers) if i in dev_sel])
+            print 'CV Fold: ', fold, 'test speakers:',args.test_speakers
+            model = createModel(args, dataset_classes, class2num)
+            models.append(model)
+    else:    
+        createModel(args, dataset_classes, class2num)
