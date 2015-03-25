@@ -237,6 +237,8 @@ class MyModel:
         if self.config.baselineClassifier.lower() == 'svm':
             self.baseline_clf = svm.LinearSVC(C=1.0)
             X = X.astype(np.float64)
+        if self.config.baselineClassifier.lower() == 'svm_poly':    
+            self.baseline_clf = svm.SVC(C=1.0, kernel='poly', probability=True, cache_size=2000, verbose = True)
         if self.config.baselineClassifier.lower() == 'trees':
             self.baseline_clf = getTreeClf()
         if self.config.baselineClassifier.lower() == 'trees2x':
@@ -259,6 +261,10 @@ class MyModel:
         if self.config.baselineClassifier.lower() == 'trees_svm':
             transform_clf = getTreeClf()
             self.baseline_clf = svm.LinearSVC(C=1.0)
+
+        if self.config.baselineClassifier.lower() == 'trees_svm_poly':
+            transform_clf = getTreeClf()
+            self.baseline_clf = svm.SVC(C=1.0, kernel='poly', probability=True, cache_size=2000, verbose = True)
 
         print 'Configured baseline clf to:',self.baseline_clf
         print 'Transform clf:',transform_clf
@@ -708,7 +714,7 @@ class MyModel:
 
             if confidence_clf and self.baseline_clf!=None:
                 frame_proba_baseline = self.baselinePredictProba([utterance_id])[0]
-                local_vote6 = self.fuse_op(frame_proba+frame_proba_baseline,op=functools.partial(weighted_majority_vote,weights=weights))
+                local_vote6 = self.fuse_op(frame_proba+(frame_proba_baseline/2),op=functools.partial(weighted_majority_vote,weights=weights))
             else:
                 local_vote6 = self.fuse_op(frame_proba_log,op=np.add.reduce)
 
@@ -976,6 +982,7 @@ def crossvalidated_result_report(results):
         outputstr += 'Individual: ' +  str(uar) + '\n'
         outputstr += 'Max+: ' + str(np.amax(uar)-np.mean(uar)) + '\n'
         outputstr += 'Max-: ' + str(np.mean(uar)-np.amin(uar)) + '\n'
+        outputstr += 'Std: ' + str(np.std(uar, dtype=np.float64)) + '\n'
     print outputstr
     return outputstr
 
@@ -1031,6 +1038,7 @@ if __name__ == '__main__':
         speakers = list(set(speakers))
         
         kf = KFold(len(speakers), n_folds=5)
+        #kf = KFold(len(speakers), n_folds=20)
 
         for fold,(train_sel, dev_sel) in enumerate(kf):
             args.test_speakers = ','.join([elem for i,elem in enumerate(speakers) if i in dev_sel])
