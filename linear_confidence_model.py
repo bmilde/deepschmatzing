@@ -16,7 +16,9 @@ class LinearConfidenceModel(BaseEstimator, ClassifierMixin):
 
         probas = X[0]
         extras = X[1]
-        
+       
+        'Fitting linear confidence model. Probas shape:',probas.shape,'extras shape:',extras.shape
+
         argmaxes = np.argmax(probas, axis=1)
 
         num_probas = probas.shape[1]

@@ -256,6 +256,7 @@ class MyModel:
             X = X.astype(np.float32)
             unspeech_utils.shuffle_in_unison(X,y)
             print 'classes:',self.config._no_classes,'hid layers:',self.config.hid_layer_units_baseline
+            print 'shape for baseline classifier:',X.shape
             self.baseline_clf = self.stdDnn((None, X.shape[1]))
 
         if self.config.baselineClassifier.lower() == 'trees_svm':
@@ -306,6 +307,8 @@ class MyModel:
 
                         eval_size=0.0,
 
+                        transform_layer_name = 'hidden3', 
+
                         on_epoch_finished=[AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.001),
                                             AdjustVariable('update_momentum', start=self.config.momentum, stop=0.99),],
                                             #EarlyStopping(patience=self.config.early_stopping_patience)],
@@ -327,7 +330,7 @@ class MyModel:
                         verbose=1,
                         ) 
 
-    def energyFeature(self,X):
+    def energyFeature(self,X,step_size):
         X_energy = getEnergy(X)
         #addes 1 to the shape of X_energy, and makes it possible to e.g. vstack it to some other feature vector
         X_energy = np.expand_dims(X_energy, axis=1)
@@ -348,7 +351,7 @@ class MyModel:
         #shuffle training vectors (inplace) for minibatch gradient descent optimisers
         unspeech_utils.shuffle_in_unison(X_train,y_train)
 
-        X_energy = self.energyFeature(X_train)
+        X_energy = self.energyFeature(X_train,step_size)
 
         #Scale mean of all training vectors
         std_scale = mean_substract.MeanNormalize(copy=False).fit(X_train)
@@ -489,6 +492,8 @@ class MyModel:
                         EarlyStopping(patience=self.config.early_stopping_patience),
                     ],
 
+                    transform_layer_name = 'hidden5',
+
                     batch_iterator_train=ShufflingBatchIteratorMixin(batch_size=512),
                     batch_iterator_test=BatchIterator(batch_size=512),
                     
@@ -545,7 +550,7 @@ class MyModel:
                 y_train_clf_proba = clf.predict_proba(X_train)
                 y_train_clf = np.argmax(y_train_clf_proba, axis=1) 
                 mask = np.equal(y_train, y_train_clf)
-                print 'shapes (energy/train):',X_energy.shape,y_train_clf_proba.shape
+                print 'shapes (energy/y_train):',X_energy.shape,y_train_clf_proba.shape
                 #y_train_clf_proba = np.hstack([y_train_clf_proba,X_energy])
                 print 'new shape:',y_train_clf_proba.shape
                 confidence_y = mask.astype(np.float32)
@@ -610,30 +615,51 @@ class MyModel:
             return fused_proba
 
     def inspect_predict(self,utterance_id):
-        clf,window_size,step_size,stride = self._dbns[0],self.config.window_sizes[0],self.config.step_sizes[0],self.config.strides[0]
+        clf,transforms,confidence,window_size,step_size,stride = self._dbns[0],self._transforms[0],self._confidences[0],self.config.window_sizes[0],self.config.step_sizes[0],self.config.strides[0]
         
         logspec_features = np.load(utterance_id+'.logspec.npy')
         
         utterance = loadIdFeat(utterance_id,'float32',window_size, step_size, stride)
-        
-        subplot(411)
+
+        subplot(311)
         imshow(logspec_features.T, aspect='auto', interpolation='nearest')
 
-        subplot(412)
-        imshow(utterance.T, aspect='auto', interpolation='nearest')
+        #subplot(512)
+        #imshow(utterance.T, aspect='auto', interpolation='nearest')
        
-        for transform in self._transforms:
-            if transform != None:
-                utterance = transform.transform(utterance)
-         
-        subplot(413)
-        imshow(utterance.T, aspect='auto', interpolation='nearest')
+        for transformer in transforms:
+            print 'transform:',transformer
+            if transformer != None:
+                utterance = transformer.transform(utterance)
+        
+        utterance = utterance.astype(np.float32)
+
+        #2D reshape for cnn
+        if self.config.deep_learner=='cnn':
+            utterance_tensor = utterance.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
+
+        print utterance_tensor.shape
+
+        embedding,y_train = self.clf_embedding([utterance_id],[0],transforms,clf,window_size,step_size,stride)#clf.transform(utterance_tensor)
+
+        #subplot(513)
+        #imshow(utterance.T, aspect='auto', interpolation='nearest')
+
+        subplot(312)
+        imshow(embedding.T, aspect='auto', interpolation='nearest')
 
         print 'calling classifier',utterance.dtype,utterance.shape
-        frame_proba = clf.predict_proba(utterance)
+        frame_proba = clf.predict_proba(utterance_tensor)
 
-        subplot(414)
+        subplot(313)
         imshow(frame_proba.T, aspect='auto', interpolation='nearest')
+
+        #subplot(514)
+        
+        #weights = confidence.predict([frame_proba,self.energyFeature(utterance,step_size)])
+        #weights = np.expand_dims(weights, axis=1)
+        #imshow(weights.T, aspect='auto', interpolation='nearest')
+        #plot(range(len(weights)),weights)
 
         show()
 
@@ -653,17 +679,19 @@ class MyModel:
 
         #2D reshape for cnn
         if self.config.deep_learner=='cnn':
-            utterances = utterances.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
-        return np.hstack(clf.transform(utterances),X2_train),y_train
+            utterances = utterances.reshape(-1, 1, window_size, utterances.shape[1] / window_size)
+        return np.hstack([clf.transform(utterances),X2_train]),y_train
 
     def baseline_embedding(self, utt_ids):
         print 'Building baselinge embedding...'
         X = loadBaselineData(utt_ids)
 
         for scaler in self.baseline_transforms:
-            scaler.transform(X)
+            X = scaler.transform(X)
 
         X = X.astype(np.float32)
+
+        print 'Baseline embedding shape:',X.shape
 
         return self.baseline_clf.transform(X)
 
@@ -676,7 +704,7 @@ class MyModel:
         multi_pred = []
         for clf,confidence_clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._confidences,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
             utterance = loadIdFeat(utterance_id,'float32',window_size, step_size, stride)
-            X_energy = self.energyFeature(utterance)
+            X_energy = self.energyFeature(utterance,step_size)
             
             for transform in transforms:
                 if transform != None:
@@ -1056,4 +1084,4 @@ if __name__ == '__main__':
         with open(args.modelfilename+'.cvresults.txt','w') as report_out:
             report_out.write(txt_report)
     else:    
-        createModel(args, dataset_classes, class2num)
+        model = createModel(args, dataset_classes, class2num)
