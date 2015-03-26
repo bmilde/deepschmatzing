@@ -160,7 +160,7 @@ def loadTrainData(ids,classes,window_size,step_size,stride,baseline_X=None):
 
 #Model configurration hyper parameters
 class ModelConfig:
-    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=512,hid_layer_units_baseline = 512,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',mergeBaseline = False,use_linear_confidence = False, weightsFile=''):
+    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=512,hid_layer_units_baseline = 512,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',mergeBaseline = False,use_linear_confidence = False, weightsFile='',preload_num_layers=-1):
         self.deep_learner = learner
         
         #feature generation and class config
@@ -204,6 +204,7 @@ class ModelConfig:
         self.mergeBaseline = mergeBaseline
         self.use_linear_confidence = use_linear_confidence
         self.weightsFile = weightsFile
+        self.preload_num_layers = preload_num_layers
 
 #Model class that can be pickeled and once trained can be used for classification
 class MyModel:
@@ -511,7 +512,8 @@ class MyModel:
                     #W=init.Uniform() 
                     )
                 if self.config.weightsFile != '':
-                    clf.load_weights_from(self.config.weightsFile)
+                    print 'Preload', self.config.preload_num_layers if self.config.preload_num_layers != -1 else 'all','weight layers from',self.config.weightsFile,'...'
+                    clf.load_weights_from(self.config.weightsFile,self.config.preload_num_layers)
             else:
 
                 print 'Using DNN as classifier'
@@ -964,7 +966,8 @@ def createModel(args,dataset_classes,class2num):
                             baselineClassifier = args.baseline,
                             mergeBaseline = args.merge_baseline,
                             use_linear_confidence = args.use_linear_confidence,
-                            weightsFile = args.weights_file) 
+                            weightsFile = args.weights_file,
+                            preload_num_layers=args.preload_num_layers) 
 
         model = MyModel(config)
         model.fit(train_ids,train_classes)
@@ -1042,6 +1045,7 @@ if __name__ == '__main__':
     parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
     parser.add_argument('--merge-baseline', dest='merge_baseline', help='merge with baseline features (only with dnn baseline)', action='store_true', default=False)
     parser.add_argument('--preload-weights-from', dest='weights_file', help='Preload weights file', type=str, default='')
+    parser.add_argument('--preload-num-layers', dest='preload_num_layers', help='The number of layers to preload, if --preload-weights-from has been specified. Defaults to preload all (-1).', type=int, default=-1)
     parser.add_argument('--load-model-from', dest='load_model', help='Load model from this file, evaluate performance only', type=str, default='')
 
     args = parser.parse_args()
