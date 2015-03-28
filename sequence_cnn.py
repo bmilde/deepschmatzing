@@ -19,6 +19,8 @@ from lasagne import init
 from sklearn import svm
 from sklearn.cross_validation import KFold
 
+from sklearn.linear_model import LogisticRegression
+
 from lasagne.updates import *
 from nolearn.lasagne import NeuralNet,BatchIterator
 
@@ -212,6 +214,7 @@ class MyModel:
         self._transforms = []
         self._dbns = []
         self._confidences = []
+        self._merged = []
         self.baseline_clf = None
         self.baseline_transforms = []
         self.config = config
@@ -281,7 +284,7 @@ class MyModel:
             print 'Fitting main classifier...'
             self.baseline_clf.fit(X,y)
 
-    def stdDnn(self,input_shape,epochs=1000):
+    def stdDnn(self,input_shape,epochs=1000,eval_frac=0.0):
         return NeuralNet(
                 layers=[  # three layers: one hidden layer
                         ('input', layers.InputLayer),
@@ -306,7 +309,7 @@ class MyModel:
                         output_num_units=self.config._no_classes,
                         output_nonlinearity=lasagne.nonlinearities.softmax,
 
-                        eval_size=0.0,
+                        eval_size=eval_frac,
 
                         transform_layer_name = 'hidden3', 
 
@@ -538,14 +541,19 @@ class MyModel:
             print 'done!'
 
             confidence_clf = None
+            merged_clf = None
 
             if self.config.mergeBaseline:
-                X_train,y_train = self.clf_embedding(all_ids,y_all,(std_scale,pca,transform_clf),clf,window_size, step_size, stride)
-                print 'Embedded X_train shape:',X_train
-                merged_clf = self.stdDnn((None, X_train.shape[1])) 
+                X_train_embed,y_train_embed = self.clf_embedding(all_ids,y_all,(std_scale,pca,transform_clf),clf,window_size, step_size, stride)
+                unspeech_utils.shuffle_in_unison(X_train_embed,y_train_embed)
+                print 'Embedded X_train shape:',X_train_embed.shape
+                print 'Embedded X_train content:',X_train_embed
+                print 'y_train_embed shape:',y_train_embed.shape
+                print 'y_train_embed',y_train_embed
+                merged_clf = self.stdDnn((None, X_train_embed.shape[1]),epochs=50,eval_frac=0.01)
+                #LogisticRegression()#svm.SVC(C=1.0, cache_size=2000,probability=True,kernel='linear')#self.stdDnn((None, X_train_embed.shape[1]),epochs=self.config.max_epochs,eval_frac=0.01) 
                 #shuffle training vectors (inplace) for minibatch gradient descent optimisers
-                unspeech_utils.shuffle_in_unison(X_train,y_train)
-                merged_clf.fit(X_train, y_train)
+                merged_clf.fit(X_train_embed, y_train_embed)
 
             if self.config.use_linear_confidence:
                 #trains a linear regression model predicting confidence of
@@ -578,7 +586,7 @@ class MyModel:
         del X_energy
         gc.collect()
 
-        return (std_scale,pca,transform_clf),clf,confidence_clf
+        return (std_scale,pca,transform_clf),clf,confidence_clf,merged_clf
 
     def fit(self,all_ids,classes):
         self._dbns,self._scalers,self.X_ids_train,self.X_ids_test,self.y_test_flat = [],[],None,None,None
@@ -591,10 +599,11 @@ class MyModel:
         for i in xrange(self.config.no_classifiers):
             if self.config.deep_learner:
                 print 'Train #',i,' dbn classifier with window_size:',self.config.window_sizes[i],'step_size=',self.config.step_sizes[i]
-                transforms,clf,confidence_clf = self.trainClassifier(all_ids,classes,self.config.window_sizes[i],self.config.step_sizes[i],self.config.strides[i],self.config.deep_learner)
+                transforms,clf,confidence_clf,merged_clf = self.trainClassifier(all_ids,classes,self.config.window_sizes[i],self.config.step_sizes[i],self.config.strides[i],self.config.deep_learner)
                 self._dbns.append(clf)
                 self._transforms.append(transforms)
                 self._confidences.append(confidence_clf)
+                self._merged.append(merged_clf)
 
     #fuse frame probabiltites, defaults to geometric mean
     def fuse_op(self,frame_proba, op=scipy.stats.gmean, normalize=True):
@@ -642,7 +651,8 @@ class MyModel:
 
         print utterance_tensor.shape
 
-        embedding,y_train = self.clf_embedding([utterance_id],[0],transforms,clf,window_size,step_size,stride)#clf.transform(utterance_tensor)
+        #embedding,y_train = self.clf_embedding([utterance_id],[0],transforms,clf,window_size,step_size,stride)
+        embedding = clf.transform(utterance_tensor)
 
         #subplot(513)
         #imshow(utterance.T, aspect='auto', interpolation='nearest')
@@ -667,10 +677,14 @@ class MyModel:
 
     #use the transform function on the base classifier as base embedding (for dnn and cnn the last layer representation)
     def clf_embedding(self,utt_ids, utt_y, transforms, clf,window_size, step_size, stride):
-        print 'Building classifier embedding...'
+        #print 'Building classifier embedding...'
         baseline_X = self.baseline_embedding(utt_ids)
+        #print 'Baseline X shape:',baseline_X
+        #print 'Baseline X content:',baseline_X
         X_train,X2_train,y_train = loadTrainData(utt_ids, utt_y, window_size, step_size, stride, baseline_X)
-        
+        #print 'X_train shape:',X_train.shape
+        #print 'X_train content:',X_train
+
         for transform in transforms:
             if transform != None:
                 utterances = transform.transform(X_train)
@@ -704,7 +718,7 @@ class MyModel:
         
         voting = []
         multi_pred = []
-        for clf,confidence_clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._confidences,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
+        for clf,confidence_clf,merged_clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._confidences,self._merged,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
             utterance = loadIdFeat(utterance_id,'float32',window_size, step_size, stride)
             X_energy = self.energyFeature(utterance,step_size)
             
@@ -741,10 +755,12 @@ class MyModel:
                 local_vote4 = self.fuse_op(frame_proba,op=np.multiply.reduce)
 
             #local_vote5 = self.fuse_op(frame_proba,op=np.maximum.reduce)
-
-            if confidence_clf and self.baseline_clf!=None:
+            if confidence_clf and merged_clf!=None:
+                embedding,y_throwaway = self.clf_embedding([utterance_id],[0],transforms,clf,window_size, step_size, stride)
+                local_vote6 = self.fuse_op(merged_clf.predict_proba(embedding),op=functools.partial(weighted_majority_vote,weights=weights))
+            elif confidence_clf and self.baseline_clf!=None:
                 frame_proba_baseline = self.baselinePredictProba([utterance_id])[0]
-                local_vote6 = self.fuse_op(frame_proba+(frame_proba_baseline/2),op=functools.partial(weighted_majority_vote,weights=weights))
+                local_vote6 = self.fuse_op(frame_proba+(frame_proba_baseline/3.0),op=functools.partial(weighted_majority_vote,weights=weights))
             else:
                 local_vote6 = self.fuse_op(frame_proba_log,op=np.add.reduce)
 
@@ -763,7 +779,7 @@ class MyModel:
 
         #majority probability voting on utterance
         pred = np.argmax(np.add.reduce(voting))
-        return pred,multi_pred,multi_pred_names
+        return pred,voting,multi_pred,multi_pred_names
    
 
     def baselinePredictProba(self,dev_ids):
@@ -785,6 +801,24 @@ class MyModel:
         X = X.astype(np.float32)
 
         return self.baseline_clf.predict(X)
+
+    def writePredictionArff(self,outfilename,test_ids,class2num,num2class):
+        arff = ''
+        arff += '@relation ComParE2015_Eating_Predictions_Langtech_TUD\n'
+        arff += '@attribute instance_name string\n'
+        arff += '@attribute prediction { '
+        arff += ', '.join([num2class[i] for i in xrange(len(num2class))])
+        arff += ' }\n'
+        for i in xrange(len(num2class)):
+            arff += '@attribute score_'+num2class[i]+' numeric\n'
+        arff += '@data\n'
+        for test_id in sorted(test_ids):
+            pred,voting,multi_pred,multi_pred_names = self.predict_utterance(test_id)
+            proba = unspeech_utils.normalize_unitlength(np.add.reduce(voting))
+            print test_id,proba
+            arff += "'"+test_id.split('/')[-1]+".wav'" + ',' + num2class[pred] + ',' + ','.join([str(elem) for elem in proba]) + '\n' 
+        with open(outfilename,'w') as outfile:
+            outfile.write(arff)
 
     def performance_on_set(self,dev_ids,dev_classes,class2num):
         #aggregated predictions by geometric mean
@@ -815,7 +849,7 @@ class MyModel:
             #now test on heldout ids (dev set)
             for myid in dev_ids:
                 #print 'testing',myid
-                pred,multi_pred,multi_pred_names = self.predict_utterance(myid)
+                pred,proba,multi_pred,multi_pred_names = self.predict_utterance(myid)
                 y_multi_pred.append(multi_pred)
                 y_pred.append(pred)
 
@@ -912,6 +946,8 @@ def createModel(args,dataset_classes,class2num):
     #for i,myclass in enumerate(dataset_classes):
     #    class2num[myclass] = i
     
+    num2class = (args.classes).split(',')
+
     no_classes = len(dataset_classes)
     print 'classes:',dataset_classes
 
@@ -922,7 +958,12 @@ def createModel(args,dataset_classes,class2num):
 
     #print len(all_ids),len(classes),len(speakers)
 
-    if args.test_speakers != '':
+    if args.write_prediction_arff != '':
+        test_ids = unspeech_utils.loadIdFile(args.filelists + 'test.txt',basedir=args.basedir,withSpeakerInfo=False)
+        train_ids, train_classes, train_speakers =  load_set(dataset_classes,'train',args.max_samples,class2num, True)
+
+
+    elif args.test_speakers != '':
         dev_speaker_sel = (args.test_speakers).split(',')
         train_ids, train_classes, train_speakers, dev_ids, dev_classes, dev_speakers = train_dev_split(all_ids, classes, speakers, dev_speaker_sel)
         if len(dev_speakers) == 0:
@@ -933,7 +974,9 @@ def createModel(args,dataset_classes,class2num):
         print 'Train classes:',set(train_classes),'dev classes:',set(dev_classes)
     else:
         train_ids, train_classes, train_speakers = all_ids, classes, speakers
-        dev_ids, dev_classes, dev_speakers = load_set(dataset_classes,'dev',args.max_samples,class2num, False)
+
+        myset = 'dev'
+        dev_ids, dev_classes, dev_speakers = load_set(dataset_classes,myset,args.max_samples,class2num, False)
 
     args_dropouts = [float(x) for x in args.dropouts.split(',')]
 
@@ -972,7 +1015,12 @@ def createModel(args,dataset_classes,class2num):
         model = MyModel(config)
         model.fit(train_ids,train_classes)
     
-    model.performance_on_set(dev_ids,dev_classes,class2num)
+    if args.write_prediction_arff != '':
+        print 'Performance on training:'
+        model.performance_on_set(train_ids, train_classes, class2num)
+        model.writePredictionArff(args.write_prediction_arff,test_ids,class2num,num2class)
+    else:    
+        model.performance_on_set(dev_ids,dev_classes,class2num)
 
     if (args.modelfilename != ''):
         
@@ -1045,8 +1093,10 @@ if __name__ == '__main__':
     parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
     parser.add_argument('--merge-baseline', dest='merge_baseline', help='merge with baseline features (only with dnn baseline)', action='store_true', default=False)
     parser.add_argument('--preload-weights-from', dest='weights_file', help='Preload weights file', type=str, default='')
+    parser.add_argument('--cv-weights-from', dest='cv_weights_run', help='Preload weights from a previous cross validation run', type=str, default='')
     parser.add_argument('--preload-num-layers', dest='preload_num_layers', help='The number of layers to preload, if --preload-weights-from has been specified. Defaults to preload all (-1).', type=int, default=-1)
     parser.add_argument('--load-model-from', dest='load_model', help='Load model from this file, evaluate performance only', type=str, default='')
+    parser.add_argument('--write-prediction-arff', dest='write_prediction_arff', help='Write prediction arff for the interspeech2015 challenge', type=str, default='')
 
     args = parser.parse_args()
 
@@ -1079,6 +1129,9 @@ if __name__ == '__main__':
             if modelfilename != '':
                 args.modelfilename = modelfilename + ('_'+str(fold))
             
+            if args.cv_weights_run != '':
+                args.weights_file = args.cv_weights_run + ('_'+str(fold)) + '.weights.npy'
+
             model = createModel(args, dataset_classes, class2num)
             models.append(model)
 
