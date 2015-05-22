@@ -9,11 +9,10 @@ def shuffle(*arrays):
     p = np.random.permutation(len(arrays[0]))
     return [array[p] for array in arrays]
 
-
-class ShufflingBatchIteratorMixin(BatchIterator):
+class ShufflingBatchIterator(BatchIterator):
     def __iter__(self):
         self.X, self.y = shuffle(self.X, self.y)
-        for res in super(ShufflingBatchIteratorMixin, self).__iter__():
+        for res in super(ShufflingBatchIterator, self).__iter__():
             yield res
 
 class EarlyStopping(object):

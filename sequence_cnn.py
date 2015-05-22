@@ -14,6 +14,7 @@ import functools
 sys.setrecursionlimit(10000)
 
 from lasagne import layers
+from lasagne.layers import dnn
 from lasagne import init
 
 from sklearn import svm
@@ -25,17 +26,21 @@ from lasagne.updates import *
 from nolearn.lasagne import NeuralNet,BatchIterator
 
 from nolearn_addon import *
-#these would be faster for 
-#try:
-#from lasagne.layers.cuda_convnet import Conv2DCCLayer as Conv2DLayer
-#from lasagne.layers.cuda_convnet import MaxPool2DCCLayer as MaxPool2DLayer
 
 import gc
 
 #except ImportError:
+from functools import partial
 
 Conv2DLayer = layers.Conv2DLayer
 MaxPool2DLayer = layers.MaxPool2DLayer
+
+#This uses Cudnn from NVIDIA, see https://developer.nvidia.com/rdp/cudnn-download?sid=811949
+#Conv2DLayer = dnn.Conv2DDNNLayer
+#MaxPool2DLayer = dnn.MaxPool2DDNNLayer
+
+DenseLayer = layers.DenseLayer
+DropoutLayer = layers.DropoutLayer
 
 from lasagne.nonlinearities import rectify,softmax
 
@@ -104,8 +109,8 @@ def loadIdFeat(myid,dtype, window_size, step_size, stride, energy_filter=1.2):
     if(logspec_features.dtype != dtype):
         logspec_features = logspec_features.astype(dtype, copy=False)
 
-    logspec_features_filtered = energy.filterSpec(logspec_features,energy_filter)
-    feat = windowed_fbank.generate_feat(logspec_features_filtered,window_size,step_size,stride)
+    #logspec_features_filtered = energy.filterSpec(logspec_features,energy_filter)
+    feat = windowed_fbank.generate_feat(logspec_features,window_size,step_size,stride)
     return feat
 
 def loadBaselineData(ids):
@@ -191,7 +196,7 @@ class ModelConfig:
         self.baselineClassifier = baselineClassifier
         
         if dropouts == None:
-            dropouts=[0.1,0.2,0.3,0.5]
+            dropouts=[0.1,0.2,0.3,0.5,0.5,0.5]
         elif isinstance( dropouts, ( int, long ) ):
             dropouts_int = dropouts
             dropouts=[dropouts_int for x in xrange(4)]
@@ -288,16 +293,20 @@ class MyModel:
         return NeuralNet(
                 layers=[  # three layers: one hidden layer
                         ('input', layers.InputLayer),
-                        ('hidden1', layers.DenseLayer),
-                        ('dropout1', layers.DropoutLayer),
-                        ('hidden2', layers.DenseLayer),
-                        ('dropout2', layers.DropoutLayer),
-                        ('hidden3', layers.DenseLayer),
-                        ('output', layers.DenseLayer),
+                        ('hidden1', DenseLayer),
+                        ('dropout1', DropoutLayer),
+                        ('hidden2', DenseLayer),
+                        ('dropout2', DropoutLayer),
+                        ('hidden3', DenseLayer),
+                        ('output', DenseLayer),
                         ],
                         # layer parameters:
 
                         hidden1_nonlinearity = rectify, hidden2_nonlinearity = rectify, hidden3_nonlinearity = rectify,
+                        
+                        #We use He-initilization, see He, Kaiming, et al. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. arXiv preprint arXiv:1502.01852 (2015).
+                        hidden1_W=init.HeNormal(),hidden2_W=init.HeNormal(),hidden3_W=init.HeNormal(),
+                        
                         dropout1_p=0.5,
                         dropout2_p=0.5,
 
@@ -313,17 +322,17 @@ class MyModel:
 
                         transform_layer_name = 'hidden3', 
 
-                        on_epoch_finished=[AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.001),
-                                            AdjustVariable('update_momentum', start=self.config.momentum, stop=0.99),],
+                        #on_epoch_finished=[AdjustVariable('update_learning_rate', start=self.config.learn_rates, stop=0.001),
+                                            #AdjustVariable('update_momentum', start=self.config.momentum, stop=0.99),],
                                             #EarlyStopping(patience=self.config.early_stopping_patience)],
                         #batch_iterator_test=MyBatchIterator(128,forced_even=True),
                         #batch_iterator_train=MyBatchIterator(128,forced_even=True),
 
                         # optimization method:
-                        update=nesterov_momentum,
+                        update=adam,
 
-                        update_learning_rate=theano.shared(float32(self.config.learn_rates)),
-                        update_momentum=theano.shared(float32(self.config.momentum)),
+                        #update_learning_rate=theano.shared(float32(self.config.learn_rates)),
+                        #update_momentum=theano.shared(float32(self.config.momentum)),
 
                         #update
                         #update_learning_rate=self.config.learn_rates,
@@ -460,32 +469,62 @@ class MyModel:
                     layers=[
                         ('input', layers.InputLayer),
                         ('conv1', Conv2DLayer),
+                        #('conv1b', Conv2DLayer),
                         ('pool1', MaxPool2DLayer),
-                        ('dropout1', layers.DropoutLayer),
+                        ('dropout1', DropoutLayer),
                         ('conv2', Conv2DLayer),
+                        #('conv2b', Conv2DLayer),
                         ('pool2', MaxPool2DLayer),
-                        ('dropout2', layers.DropoutLayer),
+                        ('dropout2', DropoutLayer),
                         ('conv3', Conv2DLayer),
+                        #('conv3b', Conv2DLayer),
                         ('pool3', MaxPool2DLayer),
-                        ('dropout3', layers.DropoutLayer),
-                        ('hidden4', layers.DenseLayer),
-                        ('dropout4', layers.DropoutLayer),
-                        ('hidden5', layers.DenseLayer),
-                        ('output', layers.DenseLayer),
+                        ('dropout3', DropoutLayer),
+                        ('conv4', Conv2DLayer),
+                        ('pool4', MaxPool2DLayer),
+                        ('dropout4', DropoutLayer),
+                        #('conv5', Conv2DLayer),
+                        #('pool5', MaxPool2DLayer),
+                        #('dropout5', DropoutLayer),
+                        ('hidden6', DenseLayer),
+                        ('dropout6', DropoutLayer),
+                        ('hidden7', DenseLayer),
+                        #('dropout7', DropoutLayer),
+                        #('hidden8', DenseLayer),
+                        ('output', DenseLayer),
                         ],
                     input_shape=(None, 1, window_len, feat_len),
-                    conv1_num_filters=32, conv1_filter_size=(3, 3), pool1_ds=(2, 2),
+
+                    conv1_num_filters=32, conv1_filter_size=(3, 3), pool1_pool_size=(2, 2), #pool1_stride=(1, 1), 
+                    #conv1b_num_filters=32, conv1b_filter_size=(3, 3),
                     dropout1_p=self.config.dropouts[0],
-                    conv2_num_filters=64, conv2_filter_size=(2, 2), pool2_ds=(2, 2),
-                    dropout2_p=self.config.dropouts[1],
-                    conv3_num_filters=128, conv3_filter_size=(2, 2), pool3_ds=(2, 2),
-                    dropout3_p=self.config.dropouts[2],
-                    hidden4_num_units=self.config.hid_layer_units, hidden5_num_units=self.config.hid_layer_units,
-                    dropout4_p=self.config.dropouts[3],
-                    output_num_units=self.config._no_classes, 
                     
-                    conv1_nonlinearity = rectify, conv2_nonlinearity = rectify, conv3_nonlinearity = rectify,
-                    hidden4_nonlinearity = rectify, hidden5_nonlinearity = rectify,
+                    conv2_num_filters=64, conv2_filter_size=(2, 2), pool2_pool_size=(2, 2), #pool2_stride=(1, 1),
+                    #conv2b_num_filters=64, conv2b_filter_size=(2, 2),
+                    dropout2_p=self.config.dropouts[1],
+
+                    conv3_num_filters=128, conv3_filter_size=(2, 2), pool3_pool_size=(2, 2), pool3_stride=(1, 1),
+                    #conv3b_num_filters=128, conv3b_filter_size=(2, 2),
+                    dropout3_p=self.config.dropouts[2],
+                    conv4_num_filters=128, conv4_filter_size=(2, 2), pool4_pool_size=(2, 2), pool4_stride=(1, 1),
+                    dropout4_p=self.config.dropouts[3],
+                    #conv5_num_filters=64, conv5_filter_size=(2, 2), pool5_pool_size=(2, 2), #pool5_stride=(1, 1),
+                    #dropout5_p=self.config.dropouts[4],
+
+                    hidden6_num_units=self.config.hid_layer_units, hidden7_num_units=self.config.hid_layer_units, #hidden8_num_units=self.config.hid_layer_units,
+                    dropout6_p=self.config.dropouts[5],
+                    #dropout7_p=self.config.dropouts[6],
+                    output_num_units=self.config._no_classes, 
+
+                    #We use He-initilization, see He, Kaiming, et al. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. arXiv preprint arXiv:1502.01852 (2015).
+                    conv1_W=init.HeNormal(), conv2_W=init.HeNormal(), conv3_W=init.HeNormal(), 
+                    conv4_W=init.HeNormal(), #conv5_W=init.HeNormal(),
+                    #conv1b_W=init.HeNormal(), conv2b_W=init.HeNormal(), conv3b_W=init.HeNormal(),
+                    hidden6_W=init.HeNormal(), hidden7_W=init.HeNormal(), #hidden8_W=init.HeNormal(),
+
+                    conv1_nonlinearity = rectify, conv2_nonlinearity = rectify, conv3_nonlinearity = rectify, conv4_nonlinearity = rectify, #conv5_nonlinearity = rectify,
+                    #conv1b_nonlinearity = rectify, conv2b_nonlinearity = rectify, conv3b_nonlinearity = rectify,
+                    hidden6_nonlinearity = rectify, hidden7_nonlinearity = rectify, #hidden8_nonlinearity = rectify,
                     output_nonlinearity=lasagne.nonlinearities.softmax,
                    
                     eval_size=0.01,
@@ -496,11 +535,12 @@ class MyModel:
                         EarlyStopping(patience=self.config.early_stopping_patience),
                     ],
 
-                    transform_layer_name = 'hidden5',
+                    transform_layer_name = 'hidden8',
 
-                    batch_iterator_train=ShufflingBatchIteratorMixin(batch_size=512),
+                    batch_iterator_train=BatchIterator(batch_size=512),
                     batch_iterator_test=BatchIterator(batch_size=512),
                     
+                    #update=adam,
                     #update=rmsprop,
                     #update_learning_rate=1.0,
                     update=nesterov_momentum,
@@ -511,8 +551,6 @@ class MyModel:
                     max_epochs=self.config.max_epochs,
                     verbose=1,
                     
-                    #w=ReluNormal()
-                    #W=init.Uniform() 
                     )
                 if self.config.weightsFile != '':
                     print 'Preload', self.config.preload_num_layers if self.config.preload_num_layers != -1 else 'all','weight layers from',self.config.weightsFile,'...'
@@ -938,7 +976,7 @@ def train_dev_split(all_ids, classes, speakers, dev_speaker_sel):
 def createModel(args,dataset_classes,class2num):
     window_sizes = [int(x) for x in args.window_size.split(',')]
     no_classifiers = len(window_sizes)
-    step_sizes = [2] 
+    step_sizes = [8] 
     strides = [1]
 
     #dataset_classes = (args.classes).split(',')
@@ -1030,10 +1068,10 @@ def createModel(args,dataset_classes,class2num):
             print 'saving network weights'
             model._dbns[0].save_weights_to(args.modelfilename+'.weights.npy')
        
-        print 'saving model...'
-        serialize(model,args.modelfilename+'.pickle')
         print 'extra copy for results'
         serialize(model.results,args.modelfilename+'.results.pickle')
+        print 'saving model...'
+        serialize(model,args.modelfilename+'.pickle')
     return model
 
 def crossvalidated_result_report(results):
@@ -1077,7 +1115,7 @@ if __name__ == '__main__':
     parser.add_argument('-lc','--use_linear_confidence',dest='use_linear_confidence',help='use linear confidence', action='store_true', default = False)
     parser.add_argument('-e', '--max-epochs',dest='max_epochs', help='maximum number of supervised finetuning epochs', default = 1000, type=int)
     parser.add_argument('-s', '--save-model',dest='modelfilename', help='store trained model to this filename, if specified', default = '', type=str)
-    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in cnn', default = '0.1,0.2,0.3,0.5', type=str)
+    parser.add_argument('-d', '--dropouts',dest='dropouts', help='dropout param in cnn', default = '0.1,0.2,0.3,0.5,0.5,0.5,0.5', type=str)
     parser.add_argument('-hu', '--hidden-layer-units',dest='hiddenlayerunits', help='number of fully dense hidden layer units', default = 512, type=int)
     parser.add_argument('-bhu', '--hidden-layer-units-baseline',dest='hiddenlayerunits_baseline', help='number of fully dense hidden layer units for baseline (default to same as -hu if set to zero)', default = 0, type=int)
     parser.add_argument('-r', '--learnrate',dest='learnrate', help='learning rate', default = 0.01, type=float)
