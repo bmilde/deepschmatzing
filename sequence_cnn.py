@@ -469,23 +469,17 @@ class MyModel:
                     layers=[
                         ('input', layers.InputLayer),
                         ('conv1', Conv2DLayer),
-                        #('conv1b', Conv2DLayer),
                         ('pool1', MaxPool2DLayer),
                         ('dropout1', DropoutLayer),
                         ('conv2', Conv2DLayer),
-                        #('conv2b', Conv2DLayer),
                         ('pool2', MaxPool2DLayer),
                         ('dropout2', DropoutLayer),
                         ('conv3', Conv2DLayer),
-                        #('conv3b', Conv2DLayer),
                         ('pool3', MaxPool2DLayer),
                         ('dropout3', DropoutLayer),
                         ('conv4', Conv2DLayer),
                         ('pool4', MaxPool2DLayer),
                         ('dropout4', DropoutLayer),
-                        #('conv5', Conv2DLayer),
-                        #('pool5', MaxPool2DLayer),
-                        #('dropout5', DropoutLayer),
                         ('hidden6', DenseLayer),
                         ('dropout6', DropoutLayer),
                         ('hidden7', DenseLayer),
@@ -518,11 +512,11 @@ class MyModel:
 
                     #We use He-initilization, see He, Kaiming, et al. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. arXiv preprint arXiv:1502.01852 (2015).
                     conv1_W=init.HeNormal(), conv2_W=init.HeNormal(), conv3_W=init.HeNormal(), 
-                    conv4_W=init.HeNormal(), #conv5_W=init.HeNormal(),
+                    #conv4_W=init.HeNormal(), #conv5_W=init.HeNormal(),
                     #conv1b_W=init.HeNormal(), conv2b_W=init.HeNormal(), conv3b_W=init.HeNormal(),
                     hidden6_W=init.HeNormal(), hidden7_W=init.HeNormal(), #hidden8_W=init.HeNormal(),
 
-                    conv1_nonlinearity = rectify, conv2_nonlinearity = rectify, conv3_nonlinearity = rectify, conv4_nonlinearity = rectify, #conv5_nonlinearity = rectify,
+                    conv1_nonlinearity = rectify, conv2_nonlinearity = rectify, conv3_nonlinearity = rectify, #conv4_nonlinearity = rectify, #conv5_nonlinearity = rectify,
                     #conv1b_nonlinearity = rectify, conv2b_nonlinearity = rectify, conv3b_nonlinearity = rectify,
                     hidden6_nonlinearity = rectify, hidden7_nonlinearity = rectify, #hidden8_nonlinearity = rectify,
                     output_nonlinearity=lasagne.nonlinearities.softmax,
@@ -554,7 +548,7 @@ class MyModel:
                     )
                 if self.config.weightsFile != '':
                     print 'Preload', self.config.preload_num_layers if self.config.preload_num_layers != -1 else 'all','weight layers from',self.config.weightsFile,'...'
-                    clf.load_weights_from(self.config.weightsFile,self.config.preload_num_layers)
+                    clf.load_weights_from(self.config.weightsFile)#,self.config.preload_num_layers)
             else:
 
                 print 'Using DNN as classifier'
@@ -842,9 +836,9 @@ class MyModel:
 
     def writePredictionArff(self,outfilename,test_ids,class2num,num2class):
         arff = ''
-        arff += '@relation ComParE2015_Eating_Predictions_Langtech_TUD\n'
-        arff += '@attribute instance_name string\n'
-        arff += '@attribute prediction { '
+        arff += '@relation ComParE2015_Eating_Predictions\n'
+        arff += '@attribute name string\n'
+        arff += '@attribute class { '
         arff += ', '.join([num2class[i] for i in xrange(len(num2class))])
         arff += ' }\n'
         for i in xrange(len(num2class)):
@@ -976,7 +970,7 @@ def train_dev_split(all_ids, classes, speakers, dev_speaker_sel):
 def createModel(args,dataset_classes,class2num):
     window_sizes = [int(x) for x in args.window_size.split(',')]
     no_classifiers = len(window_sizes)
-    step_sizes = [8] 
+    step_sizes = [2] 
     strides = [1]
 
     #dataset_classes = (args.classes).split(',')
