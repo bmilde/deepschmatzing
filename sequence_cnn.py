@@ -19,8 +19,11 @@ from lasagne import init
 
 from sklearn import svm
 from sklearn.cross_validation import KFold
+from sklearn import linear_model
+from sklearn.kernel_approximation import RBFSampler
 
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
 
 from lasagne.updates import *
 from nolearn.lasagne import NeuralNet,BatchIterator
@@ -60,7 +63,7 @@ import sklearn
 import itertools
 
 from sklearn import linear_model
-
+from sklearn.svm import NuSVC
 from feature_gen.energy import getEnergy
 
 #plotting
@@ -124,11 +127,23 @@ def loadBaselineData(ids):
     return X
 
 # Load specgrams and generate windowed feature vectors
-def loadTrainData(ids,classes,window_size,step_size,stride,baseline_X=None):
+def loadTrainData(ids,classes,window_size,step_size,stride,baseline_X=None,withAugmentedData=False):
     
+    ids_new = list(ids)
+    variants = []
+    if withAugmentedData:
+        #TODO: make this a command line parameter
+        variants = ['_lower','_higher']
+    
+        for variant in variants:
+            ids_new += [myid+variant for myid in ids]
+        classes_new = list(classes)*(len(variants)+1)  
+    else:
+        classes_new = classes
+
     #iterate through all files and find out the space needed to store all data in memory
     required_shape = [0,0]
-    for myid in ids:
+    for myid in ids_new:
         #do not load array into memory yet
         #logspec_features_disk = np.load(myid+'.logspec.npy',mmap_mode='r')
         #feat_gen_shape = windowed_fbank.len_feat(logspec_features_disk.shape, window_size,step_size,stride)
@@ -147,7 +162,9 @@ def loadTrainData(ids,classes,window_size,step_size,stride,baseline_X=None):
     pos = 0
     i = 0
 
-    for myid,myclass in itertools.izip(ids,classes):
+    assert(len(classes_new)==len(ids_new))
+
+    for myid,myclass in itertools.izip(ids_new,classes_new):
             feat = loadIdFeat(myid,'float32',window_size,step_size,stride)
             feat_len = feat.shape[0]
             feat_dim = feat.shape[1]
@@ -167,7 +184,7 @@ def loadTrainData(ids,classes,window_size,step_size,stride,baseline_X=None):
 
 #Model configurration hyper parameters
 class ModelConfig:
-    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=512,hid_layer_units_baseline = 512,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',mergeBaseline = False,use_linear_confidence = False, weightsFile='',preload_num_layers=-1):
+    def __init__(self,learner,window_sizes,step_sizes,strides,class2num,max_epochs=1000,use_sparseFiltering=False,use_pca=True,stackSVM=True,pca_whiten=False,pca_components=100,learn_rates=0.1,momentum=0.9,minibatch_size=256,hid_layer_units=512,hid_layer_units_baseline = 512,dropouts=None,random_state=0,early_stopping_patience=100,iterations=1,computeBaseline=True,baselineClassifier = 'svm',mergeBaseline = False,use_linear_confidence = False, weightsFile='',preload_num_layers=-1):
         self.deep_learner = learner
         
         #feature generation and class config
@@ -182,6 +199,7 @@ class ModelConfig:
         self._no_langs = len(class2num.keys())
         self._no_classes = self._no_langs
         self.use_pca = use_pca
+        self.stackSVM = stackSVM
         self.use_lda = False
         self.use_sparseFiltering = use_sparseFiltering
         self.pca_whiten = pca_whiten
@@ -510,6 +528,8 @@ class MyModel:
                     #dropout7_p=self.config.dropouts[6],
                     output_num_units=self.config._no_classes, 
 
+                    transform_layer_name='hidden7',
+
                     #We use He-initilization, see He, Kaiming, et al. Delving deep into rectifiers: Surpassing human-level performance on imagenet classification. arXiv preprint arXiv:1502.01852 (2015).
                     conv1_W=init.HeNormal(), conv2_W=init.HeNormal(), conv3_W=init.HeNormal(), 
                     #conv4_W=init.HeNormal(), #conv5_W=init.HeNormal(),
@@ -528,8 +548,6 @@ class MyModel:
                         AdjustVariable('update_momentum', start=self.config.momentum, stop=0.999),
                         EarlyStopping(patience=self.config.early_stopping_patience),
                     ],
-
-                    transform_layer_name = 'hidden8',
 
                     batch_iterator_train=BatchIterator(batch_size=512),
                     batch_iterator_test=BatchIterator(batch_size=512),
@@ -575,8 +593,23 @@ class MyModel:
             confidence_clf = None
             merged_clf = None
 
-            if self.config.mergeBaseline:
-                X_train_embed,y_train_embed = self.clf_embedding(all_ids,y_all,(std_scale,pca,transform_clf),clf,window_size, step_size, stride)
+            if self.config.stackSVM:
+                transform_clf_new = clf
+                print 'Creating classifier embedding...'
+                X_train_embed = transform_clf_new.transform(X_train)
+                print 'Done!'
+                #rbf_transform = RBFSampler(gamma=1.0,n_components=500)
+                #print 'RBF-embed:',rbf_transform
+                #X_train_embed_rbf = rbf_transform.fit_transform(X_train_embed)
+                clf = linear_model.SGDClassifier(verbose=1, loss='log', n_iter=1000, n_jobs=-1)
+                print 'Fitting:',clf
+                clf.fit(X_train_embed, y_train)
+                print 'Done!'
+                transform_clf = Pipeline([('transform_clf_new',transform_clf_new)])#,('rbf_transform',rbf_transform)])
+                X_train = X_train_embed
+
+            elif self.config.mergeBaseline:
+                X_train_embed,y_train_embed = self.clf_and_baseline_embedding(all_ids,y_all,(std_scale,pca,transform_clf),clf,window_size, step_size, stride)
                 unspeech_utils.shuffle_in_unison(X_train_embed,y_train_embed)
                 print 'Embedded X_train shape:',X_train_embed.shape
                 print 'Embedded X_train content:',X_train_embed
@@ -708,7 +741,7 @@ class MyModel:
         show()
 
     #use the transform function on the base classifier as base embedding (for dnn and cnn the last layer representation)
-    def clf_embedding(self,utt_ids, utt_y, transforms, clf,window_size, step_size, stride):
+    def clf_and_baseline_embedding(self,utt_ids, utt_y, transforms, clf,window_size, step_size, stride):
         #print 'Building classifier embedding...'
         baseline_X = self.baseline_embedding(utt_ids)
         #print 'Baseline X shape:',baseline_X
@@ -753,9 +786,15 @@ class MyModel:
         for clf,confidence_clf,merged_clf,transforms,window_size,step_size,stride in itertools.izip(self._dbns,self._confidences,self._merged,self._transforms,self.config.window_sizes,self.config.step_sizes,self.config.strides):
             utterance = loadIdFeat(utterance_id,'float32',window_size, step_size, stride)
             X_energy = self.energyFeature(utterance,step_size)
-            
+          
+
             for transform in transforms:
                 if transform != None:
+                    if(utterance.dtype != 'float32'):
+                        utterance = utterance.astype('float32', copy=False)
+                    #Hacky: reshape utterance before transforming with CNN, as in the stackSVM case one of the transforms is going to be the CNN
+                    if self.config.stackSVM and type(transform) is Pipeline:
+                        utterance = utterance.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
                     utterance = transform.transform(utterance)
 
             if(utterance.dtype != 'float32'):
@@ -763,7 +802,7 @@ class MyModel:
                 utterance = utterance.astype('float32', copy=False)
 
             #2D reshape for cnn
-            if self.config.deep_learner=='cnn':
+            if self.config.deep_learner=='cnn' and not self.config.stackSVM:
                 utterance = utterance.reshape(-1, 1, window_size, utterance.shape[1] / window_size)
 
             #hard decision per frame, agg with majority voting
@@ -1026,6 +1065,7 @@ def createModel(args,dataset_classes,class2num):
                             max_epochs=args.max_epochs,
                             use_sparseFiltering=args.use_sparse,
                             use_pca=args.use_pca,
+                            stackSVM=args.stack_svm,
                             pca_whiten=args.pca_whiten,
                             pca_components=100,
                             learn_rates=args.learnrate,
@@ -1058,7 +1098,7 @@ def createModel(args,dataset_classes,class2num):
         
         print 'serialzing model...'
 
-        if args.deep_learner == 'cnn' or args.deep_learner == 'dnn':
+        if args.deep_learner == 'cnn' or args.deep_learner == 'dnn' and not args.stack_svm:
             print 'saving network weights'
             model._dbns[0].save_weights_to(args.modelfilename+'.weights.npy')
        
@@ -1123,6 +1163,7 @@ if __name__ == '__main__':
     parser.add_argument('--with-sparsefiltering', dest='use_sparse', help='Use sparse filtering features', action='store_true', default=False)
     parser.add_argument('--pca', dest='use_pca', help='pca reduction of feature space', action='store_true', default=False)
     parser.add_argument('--pca-whiten', dest='pca_whiten', help='pca whiten (decorellate) features', action='store_true', default=False)
+    parser.add_argument('--stack-svm', dest='stack_svm', help='stack a svm on top of deep learner (e.g. cnn)', action='store_true', default=False)
     parser.add_argument('--merge-baseline', dest='merge_baseline', help='merge with baseline features (only with dnn baseline)', action='store_true', default=False)
     parser.add_argument('--preload-weights-from', dest='weights_file', help='Preload weights file', type=str, default='')
     parser.add_argument('--cv-weights-from', dest='cv_weights_run', help='Preload weights from a previous cross validation run', type=str, default='')

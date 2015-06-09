@@ -36,10 +36,17 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--frate',dest='frate', help='number of frames per minute (int, default:100)', default = 100, type=int)
     parser.add_argument('-n', '--nfilt',dest='nfilt', help='number of filter banks (int, default:40)', default = 40, type=int)
     parser.add_argument('-w', '--window',dest='wlen', help='size of window, in seconds. (float, default:0.0256)', default = 0.0256, type=float)    
+    parser.add_argument('-var', '--variants', dest='var', help='if artificially generated variants of the files are available, provide a list of suffixes, semicolon-saparated. (e.g. _lower;_higher)', default='',type=str)
     parser.add_argument('-bdir', '--basedir',dest='basedir', help='base dir of all files, should end with /', default = './', type=str)
 
     args = parser.parse_args()
     ids = unspeech_utils.loadIdFile(args.filelist,basedir=args.basedir)
+    if args.var!='':
+        ids_new = list(ids)
+        for variant in args.var.split(';'):
+            ids_new += [myid+variant for myid in ids if 'train' in myid]
+        ids = ids_new
+
     genLogspecForId_partial = functools.partial(genLogspecForId,nofilts=args.nfilt,framerate=args.frate,windowlen=args.wlen)
 
     print 'Going to process ', len(ids), ' files.'
