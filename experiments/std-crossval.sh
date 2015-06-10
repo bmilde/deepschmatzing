@@ -1,0 +1,1 @@
+time python sequence_cnn.py -bdir /srv/data/speech/ComParE2015/eating_40fbank_8khz/wav/ -f corpus/eating_challenge_nodev/ -c No_Food,Banana,Crisp,Nectarine,Haribo,Apple,Biscuit -p 100 -e 1000 -r 0.01 -m -1 -s models/cnn_500_hidden_larger_convnet -cv -b dnn -hu 500 -bhu 1000 -l cnn --use_linear_confidence -d 0.2,0.3,0.4,0.5,0.5,0.5,0.5

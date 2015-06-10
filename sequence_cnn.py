@@ -262,7 +262,7 @@ class MyModel:
         transform_clf = None
 
         if self.config.baselineClassifier.lower() == 'svm':
-            self.baseline_clf = svm.LinearSVC(C=1.0)
+            self.baseline_clf = svm.LinearSVC(C=0.001)
             X = X.astype(np.float64)
         if self.config.baselineClassifier.lower() == 'svm_poly':    
             self.baseline_clf = svm.SVC(C=1.0, kernel='poly', probability=True, cache_size=2000, verbose = True)
