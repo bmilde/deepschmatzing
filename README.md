@@ -14,4 +14,4 @@ The Eating Condition classification task is to determine if a short utterance is
 
 We made use of transfer learning and data augmentation, i.e. transferring weights of a 7-way language identification system trained on Voxforge. Weights of the convolutional layers of the trained Voxforge LID network were used as initialisation. [Rubberband](http://breakfastquay.com/rubberband/) was used to generate additional pitch shifted variants of the training files (+/- 1 semitone, crisp level 6).
 
-This code evolved under the time constrains of a challenge - good results were more important than good code quality. You should be able to replicate results with some effort from your part, but don't expect easy to read code. 
+This code evolved under the time constrains of a challenge - good results were more important than good code quality. You should be able to replicate results, but don't expect easy to read code. 
